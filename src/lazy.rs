@@ -124,29 +124,30 @@ impl<'a> LazyPdf<'a> {
         id: ObjectId,
         container: u32,
     ) -> std::result::Result<Object, lopdf::Error> {
-        if let Some(object) = self
-            .object_streams
-            .lock()
-            .expect("object stream cache mutex poisoned")
-            .get(container, id)
-        {
-            return Ok(object);
-        }
-
-        let container_id = (container, 0);
-        let mut already_seen = HashSet::new();
-        let container_object = self.reader.get_object(container_id, &mut already_seen)?;
-        let mut container_stream = container_object.as_stream()?.clone();
-        let object_stream = Arc::new(ObjectStream::new(&mut container_stream)?.objects);
-        let object = object_stream
+        let cached_objects = {
+            self.object_streams
+                .lock()
+                .expect("object stream cache mutex poisoned")
+                .get(container)
+        };
+        let objects = if let Some(objects) = cached_objects {
+            objects
+        } else {
+            let container_id = (container, 0);
+            let mut already_seen = HashSet::new();
+            let container_object = self.reader.get_object(container_id, &mut already_seen)?;
+            let mut container_stream = container_object.as_stream()?.clone();
+            let object_stream = Arc::new(ObjectStream::new(&mut container_stream)?.objects);
+            self.object_streams
+                .lock()
+                .expect("object stream cache mutex poisoned")
+                .insert(container, Arc::clone(&object_stream));
+            object_stream
+        };
+        objects
             .get(&(id.0, 0))
             .cloned()
-            .ok_or(lopdf::Error::MissingXrefEntry)?;
-        self.object_streams
-            .lock()
-            .expect("object stream cache mutex poisoned")
-            .insert(container, object_stream);
-        Ok(object)
+            .ok_or(lopdf::Error::MissingXrefEntry)
     }
 }
 
@@ -203,15 +204,15 @@ struct ObjectStreamCache {
 }
 
 impl ObjectStreamCache {
-    fn get(&mut self, container: u32, id: ObjectId) -> Option<Object> {
+    fn get(&mut self, container: u32) -> Option<Arc<BTreeMap<ObjectId, Object>>> {
         let index = self
             .entries
             .iter()
             .position(|(cached_container, _)| *cached_container == container)?;
         let (cached_container, objects) = self.entries.remove(index)?;
-        let object = objects.get(&(id.0, 0)).cloned();
-        self.entries.push_back((cached_container, objects));
-        object
+        self.entries
+            .push_back((cached_container, Arc::clone(&objects)));
+        Some(objects)
     }
 
     fn insert(&mut self, container: u32, objects: Arc<BTreeMap<ObjectId, Object>>) {

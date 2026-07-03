@@ -365,6 +365,44 @@ fn split_pages_prunes_shared_page_resources() {
 }
 
 #[test]
+fn merge_whole_document_keeps_shared_page_resources() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("shared-resources.pdf");
+    let merged = temp.path().join("merged.pdf");
+
+    write_shared_resources_fixture(&input, false);
+    merge(&[MergeInput::all(&input)], &merged).unwrap();
+
+    assert_page_resources_in_document(
+        &merged,
+        &QpdfValidator::detect(),
+        3,
+        1,
+        &["X0", "X1", "X2", "X3", "X4", "X5", "X6"],
+        &["F1"],
+    );
+}
+
+#[test]
+fn merge_selected_ranges_prunes_shared_page_resources() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("shared-resources.pdf");
+    let merged = temp.path().join("merged-range.pdf");
+
+    write_shared_resources_fixture(&input, false);
+    merge(
+        &[MergeInput {
+            path: input,
+            ranges: vec![PageRangeGroup::parse("1").unwrap()],
+        }],
+        &merged,
+    )
+    .unwrap();
+
+    assert_page_resources(&merged, &QpdfValidator::detect(), &["X0"], &[]);
+}
+
+#[test]
 fn split_pages_falls_back_when_content_stream_is_malformed() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("malformed-content.pdf");
@@ -763,16 +801,27 @@ fn write_form_font_fixture(path: &Path, form_has_own_resources: bool) {
 }
 
 fn assert_page_resources(path: &Path, qpdf: &QpdfValidator, xobjects: &[&str], fonts: &[&str]) {
+    assert_page_resources_in_document(path, qpdf, 1, 1, xobjects, fonts);
+}
+
+fn assert_page_resources_in_document(
+    path: &Path,
+    qpdf: &QpdfValidator,
+    expected_pages: usize,
+    page_number: u32,
+    xobjects: &[&str],
+    fonts: &[&str],
+) {
     assert_written(path);
-    qpdf.validate(path, 1);
+    qpdf.validate(path, expected_pages);
 
     let document = Document::load(path)
         .unwrap_or_else(|err| panic!("failed to load split output {}: {err}", path.display()));
     let pages = document.get_pages();
     let page_id = pages
-        .get(&1)
+        .get(&page_number)
         .copied()
-        .unwrap_or_else(|| panic!("missing page 1 in {}", path.display()));
+        .unwrap_or_else(|| panic!("missing page {page_number} in {}", path.display()));
     let page = document
         .get_object(page_id)
         .unwrap_or_else(|err| panic!("failed to read page object {}: {err}", path.display()))

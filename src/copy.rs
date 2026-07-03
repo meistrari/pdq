@@ -339,16 +339,9 @@ impl CopyContext {
                 }
                 Ok(Object::Array(copied))
             }
-            Object::Dictionary(dict) => {
-                let mut copied = lopdf::Dictionary::new();
-                for (key, value) in dict.iter() {
-                    copied.set(
-                        key.clone(),
-                        self.copy_value(source, target, value, depth + 1)?,
-                    );
-                }
-                Ok(Object::Dictionary(copied))
-            }
+            Object::Dictionary(dict) => Ok(Object::Dictionary(
+                self.copy_dictionary(source, target, dict, depth)?,
+            )),
             Object::Stream(stream) => Ok(Object::Stream(self.copy_stream(
                 source,
                 target,
@@ -427,68 +420,25 @@ impl CopyContext {
     ) -> Result<Dictionary> {
         check_copy_depth(depth)?;
         if !self.options.prune_resources || !self.prune_nested_resources || !is_form_xobject(dict) {
-            return match self.copy_value(
-                source,
-                target,
-                &Object::Dictionary(dict.clone()),
-                depth + 1,
-            )? {
-                Object::Dictionary(copied) => Ok(copied),
-                _ => unreachable!("dictionary copy returned non-dictionary"),
-            };
+            return self.copy_dictionary(source, target, dict, depth + 1);
         }
 
         let Ok(resources_value) = dict.get(b"Resources") else {
-            return match self.copy_value(
-                source,
-                target,
-                &Object::Dictionary(dict.clone()),
-                depth + 1,
-            )? {
-                Object::Dictionary(copied) => Ok(copied),
-                _ => unreachable!("dictionary copy returned non-dictionary"),
-            };
+            return self.copy_dictionary(source, target, dict, depth + 1);
         };
         let Some(resources) = self.resolve_dictionary(source, resources_value)? else {
-            return match self.copy_value(
-                source,
-                target,
-                &Object::Dictionary(dict.clone()),
-                depth + 1,
-            )? {
-                Object::Dictionary(copied) => Ok(copied),
-                _ => unreachable!("dictionary copy returned non-dictionary"),
-            };
-        };
-        let Ok(content) = stream.decompressed_content() else {
-            return match self.copy_value(
-                source,
-                target,
-                &Object::Dictionary(dict.clone()),
-                depth + 1,
-            )? {
-                Object::Dictionary(copied) => Ok(copied),
-                _ => unreachable!("dictionary copy returned non-dictionary"),
-            };
+            return self.copy_dictionary(source, target, dict, depth + 1);
         };
         let Some(used) = scan::collect_used_names_from_stream(
             source,
             stream_id,
-            &content,
+            || stream.decompressed_content().ok(),
             &resources,
             &mut self.dictionary_cache,
             &mut self.used_names_cache,
         )?
         else {
-            return match self.copy_value(
-                source,
-                target,
-                &Object::Dictionary(dict.clone()),
-                depth + 1,
-            )? {
-                Object::Dictionary(copied) => Ok(copied),
-                _ => unreachable!("dictionary copy returned non-dictionary"),
-            };
+            return self.copy_dictionary(source, target, dict, depth + 1);
         };
 
         let mut copied = Dictionary::new();
@@ -509,6 +459,24 @@ impl CopyContext {
                     self.copy_value(source, target, value, depth + 1)?,
                 );
             }
+        }
+        Ok(copied)
+    }
+
+    fn copy_dictionary(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        dict: &Dictionary,
+        depth: usize,
+    ) -> Result<Dictionary> {
+        check_copy_depth(depth)?;
+        let mut copied = Dictionary::new();
+        for (key, value) in dict.iter() {
+            copied.set(
+                key.clone(),
+                self.copy_value(source, target, value, depth + 1)?,
+            );
         }
         Ok(copied)
     }
@@ -737,11 +705,20 @@ pub(crate) fn copy_pages(
     target: &mut Document,
     page_ids: &[ObjectId],
 ) -> Result<Vec<ObjectId>> {
+    copy_pages_with_options(source, target, page_ids, CopyOptions::default())
+}
+
+pub(crate) fn copy_pages_with_options(
+    source: &impl ObjectSource,
+    target: &mut Document,
+    page_ids: &[ObjectId],
+    options: CopyOptions,
+) -> Result<Vec<ObjectId>> {
     let mut copied_pages = Vec::with_capacity(page_ids.len());
     // Annotation preservation is intentionally deferred because annotation
     // dictionaries often contain page/document backreferences that need
     // careful remapping.
-    let mut context = CopyContext::new(CopyOptions::default());
+    let mut context = CopyContext::new(options);
 
     for page_id in page_ids {
         copied_pages.push(context.copy_page(source, target, *page_id)?);
