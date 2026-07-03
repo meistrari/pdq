@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
@@ -45,7 +45,15 @@ struct SplitPagesArgs {
     output: String,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> ExitCode {
+    if let Err(err) = run() {
+        eprintln!("error: {err}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Split(args) => {
             let outputs = parse_split_outputs(args.outputs)?;
