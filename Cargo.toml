@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Artistic-2.0"
-publish = false
+description = "PDF operations library"
+repository = "https://github.com/meistrari/pdq"
+readme = "README.md"
+keywords = ["pdf", "split", "merge", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
