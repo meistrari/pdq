@@ -1,0 +1,19 @@
+[package]
+name = "pdq"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Artistic-2.0"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+lopdf = "0.43.0"
+memmap2 = "0.9.9"
+rayon = "1.12.0"
+thiserror = "2.0.17"
+
+[dev-dependencies]
+assert_cmd = "2.1.1"
+predicates = "3.1.3"
+tempfile = "3.23.0"

@@ -1,0 +1,629 @@
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+    ops::Deref,
+    rc::Rc,
+};
+
+use lopdf::{Dictionary, Document, Object, ObjectId};
+
+use crate::{scan, scan::UsedNames, PdfOpsError, Result};
+
+const INHERITABLE_PAGE_ATTRS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
+const MAX_COPY_DEPTH: usize = 256;
+const RESOURCE_PRUNE_MIN_NAMES: usize = 6;
+
+pub(crate) trait ObjectSource {
+    fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error>;
+}
+
+impl ObjectSource for Document {
+    fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error> {
+        Ok(Cow::Borrowed(self.get_object(id)?))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CopyOptions {
+    pub copy_annotations: bool,
+    pub prune_resources: bool,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        Self {
+            copy_annotations: false,
+            prune_resources: true,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct CopyContext {
+    object_map: BTreeMap<ObjectId, ObjectId>,
+    dictionary_cache: BTreeMap<ObjectId, Rc<Dictionary>>,
+    selected_pages: BTreeSet<ObjectId>,
+    options: CopyOptions,
+    prune_nested_resources: bool,
+}
+
+impl CopyContext {
+    pub fn new(options: CopyOptions) -> Self {
+        Self {
+            object_map: BTreeMap::new(),
+            dictionary_cache: BTreeMap::new(),
+            selected_pages: BTreeSet::new(),
+            options,
+            prune_nested_resources: false,
+        }
+    }
+
+    pub(crate) fn copy_page(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        page_id: ObjectId,
+    ) -> Result<ObjectId> {
+        let new_id = if self.selected_pages.contains(&page_id) {
+            self.copy_page_instance(source, target, page_id)?
+        } else {
+            let new_id = self.copy_object(source, target, page_id)?;
+            self.selected_pages.insert(page_id);
+            new_id
+        };
+        let page = target
+            .get_object(new_id)
+            .map_err(PdfOpsError::Pdf)?
+            .as_dict()
+            .map_err(|_| PdfOpsError::InvalidStructure("copied page is not a dictionary".into()))?;
+        if !page.has_type(b"Page") {
+            return Err(PdfOpsError::InvalidStructure(
+                "copied page does not have /Type /Page".into(),
+            ));
+        }
+        Ok(new_id)
+    }
+
+    fn copy_page_instance(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        old_page_id: ObjectId,
+    ) -> Result<ObjectId> {
+        let object = source
+            .get_object_value(old_page_id)
+            .map_err(PdfOpsError::Pdf)?;
+        let page = object
+            .as_dict()
+            .map_err(|_| PdfOpsError::InvalidStructure("page is not a dictionary".into()))?;
+        if !page.has_type(b"Page") {
+            return Err(PdfOpsError::InvalidStructure(
+                "copied page does not have /Type /Page".into(),
+            ));
+        }
+
+        let new_id = target.new_object_id();
+        let previous = self.object_map.insert(old_page_id, new_id);
+        target.objects.insert(new_id, Object::Null);
+
+        let copied = match self.copy_page_dictionary(source, target, old_page_id, page, 0) {
+            Ok(copied) => copied,
+            Err(err) => {
+                restore_object_mapping(&mut self.object_map, old_page_id, previous);
+                return Err(err);
+            }
+        };
+        target.objects.insert(new_id, Object::Dictionary(copied));
+        restore_object_mapping(&mut self.object_map, old_page_id, previous);
+        Ok(new_id)
+    }
+
+    pub(crate) fn copy_object(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        old_id: ObjectId,
+    ) -> Result<ObjectId> {
+        self.copy_object_at_depth(source, target, old_id, 0)
+    }
+
+    fn copy_object_at_depth(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        old_id: ObjectId,
+        depth: usize,
+    ) -> Result<ObjectId> {
+        check_copy_depth(depth)?;
+        if let Some(new_id) = self.object_map.get(&old_id) {
+            return Ok(*new_id);
+        }
+
+        let new_id = target.new_object_id();
+        self.object_map.insert(old_id, new_id);
+        target.objects.insert(new_id, Object::Null);
+
+        let object = match source.get_object_value(old_id) {
+            Ok(object) => object,
+            Err(lopdf::Error::ObjectNotFound(_)) => {
+                target.objects.insert(new_id, Object::Null);
+                return Ok(new_id);
+            }
+            Err(err) => return Err(PdfOpsError::Pdf(err)),
+        };
+        let copied = match object.as_ref() {
+            Object::Dictionary(dict) if dict.has_type(b"Page") => Object::Dictionary(
+                self.copy_page_dictionary(source, target, old_id, dict, depth + 1)?,
+            ),
+            _ => self.copy_value(source, target, object.as_ref(), depth + 1)?,
+        };
+        target.objects.insert(new_id, copied);
+        Ok(new_id)
+    }
+
+    fn copy_page_dictionary(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        old_page_id: ObjectId,
+        page: &Dictionary,
+        depth: usize,
+    ) -> Result<Dictionary> {
+        check_copy_depth(depth)?;
+        let mut copied = Dictionary::new();
+        for (key, value) in page.iter() {
+            if key.as_slice() == b"Parent" {
+                continue;
+            }
+            if key.as_slice() == b"Annots" && !self.options.copy_annotations {
+                continue;
+            }
+            if key.as_slice() == b"Resources" {
+                copied.set(
+                    key.clone(),
+                    self.copy_page_resources(source, target, old_page_id, page, value, depth + 1)?,
+                );
+            } else {
+                copied.set(
+                    key.clone(),
+                    self.copy_value(source, target, value, depth + 1)?,
+                );
+            }
+        }
+
+        for key in INHERITABLE_PAGE_ATTRS {
+            if copied.has(key) {
+                continue;
+            }
+            if let Some(value) = inherited_attr(source, old_page_id, key)? {
+                if key == b"Resources" {
+                    copied.set(
+                        key.to_vec(),
+                        self.copy_page_resources(
+                            source,
+                            target,
+                            old_page_id,
+                            page,
+                            &value,
+                            depth + 1,
+                        )?,
+                    );
+                } else {
+                    copied.set(
+                        key.to_vec(),
+                        self.copy_value(source, target, &value, depth + 1)?,
+                    );
+                }
+            }
+        }
+
+        Ok(copied)
+    }
+
+    fn copy_page_resources(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        _old_page_id: ObjectId,
+        page: &Dictionary,
+        value: &Object,
+        depth: usize,
+    ) -> Result<Object> {
+        check_copy_depth(depth)?;
+        if !self.options.prune_resources {
+            return self.copy_value(source, target, value, depth + 1);
+        }
+
+        let Some(resources) = self.resolve_dictionary(source, value)? else {
+            return self.copy_value(source, target, value, depth + 1);
+        };
+        if !self.should_prune_resources(source, &resources)? {
+            return self.copy_value(source, target, value, depth + 1);
+        }
+        let Some(used) = scan::collect_used_names(source, page, &resources)? else {
+            return self.copy_value(source, target, value, depth + 1);
+        };
+        match self.copy_pruned_resources(source, target, &resources, &used, depth + 1)? {
+            Some(pruned) => Ok(pruned),
+            None => self.copy_value(source, target, value, depth + 1),
+        }
+    }
+
+    fn copy_pruned_resources(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        resources: &Dictionary,
+        used: &UsedNames,
+        depth: usize,
+    ) -> Result<Option<Object>> {
+        check_copy_depth(depth)?;
+        let mut copied = Dictionary::new();
+        for (key, value) in resources.iter() {
+            if key.as_slice() == b"Font" || key.as_slice() == b"XObject" {
+                let Some(resource_dict) = self.resolve_dictionary(source, value)? else {
+                    return Ok(None);
+                };
+                let mut pruned = Dictionary::new();
+                for (name, resource_value) in resource_dict.iter() {
+                    if used.contains(name) {
+                        pruned.set(
+                            name.clone(),
+                            self.copy_resource_value(source, target, resource_value, depth + 1)?,
+                        );
+                    }
+                }
+                copied.set(key.clone(), Object::Dictionary(pruned));
+            } else {
+                copied.set(
+                    key.clone(),
+                    self.copy_value(source, target, value, depth + 1)?,
+                );
+            }
+        }
+        Ok(Some(Object::Dictionary(copied)))
+    }
+
+    fn copy_value(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        value: &Object,
+        depth: usize,
+    ) -> Result<Object> {
+        check_copy_depth(depth)?;
+        match value {
+            Object::Reference(id) => Ok(Object::Reference(self.copy_object_at_depth(
+                source,
+                target,
+                *id,
+                depth + 1,
+            )?)),
+            Object::Array(items) => {
+                let mut copied = Vec::with_capacity(items.len());
+                for item in items {
+                    copied.push(self.copy_value(source, target, item, depth + 1)?);
+                }
+                Ok(Object::Array(copied))
+            }
+            Object::Dictionary(dict) => {
+                let mut copied = lopdf::Dictionary::new();
+                for (key, value) in dict.iter() {
+                    copied.set(
+                        key.clone(),
+                        self.copy_value(source, target, value, depth + 1)?,
+                    );
+                }
+                Ok(Object::Dictionary(copied))
+            }
+            Object::Stream(stream) => {
+                let mut cloned = stream.clone();
+                cloned.dict =
+                    self.copy_stream_dictionary(source, target, stream, &cloned.dict, depth + 1)?;
+                Ok(Object::Stream(cloned))
+            }
+            _ => Ok(value.clone()),
+        }
+    }
+
+    fn copy_stream_dictionary(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        stream: &lopdf::Stream,
+        dict: &Dictionary,
+        depth: usize,
+    ) -> Result<Dictionary> {
+        check_copy_depth(depth)?;
+        if !self.options.prune_resources || !self.prune_nested_resources || !is_form_xobject(dict) {
+            return match self.copy_value(
+                source,
+                target,
+                &Object::Dictionary(dict.clone()),
+                depth + 1,
+            )? {
+                Object::Dictionary(copied) => Ok(copied),
+                _ => unreachable!("dictionary copy returned non-dictionary"),
+            };
+        }
+
+        let Ok(resources_value) = dict.get(b"Resources") else {
+            return match self.copy_value(
+                source,
+                target,
+                &Object::Dictionary(dict.clone()),
+                depth + 1,
+            )? {
+                Object::Dictionary(copied) => Ok(copied),
+                _ => unreachable!("dictionary copy returned non-dictionary"),
+            };
+        };
+        let Some(resources) = self.resolve_dictionary(source, resources_value)? else {
+            return match self.copy_value(
+                source,
+                target,
+                &Object::Dictionary(dict.clone()),
+                depth + 1,
+            )? {
+                Object::Dictionary(copied) => Ok(copied),
+                _ => unreachable!("dictionary copy returned non-dictionary"),
+            };
+        };
+        let Ok(content) = stream.decompressed_content() else {
+            return match self.copy_value(
+                source,
+                target,
+                &Object::Dictionary(dict.clone()),
+                depth + 1,
+            )? {
+                Object::Dictionary(copied) => Ok(copied),
+                _ => unreachable!("dictionary copy returned non-dictionary"),
+            };
+        };
+        let Some(used) = scan::collect_used_names_from_bytes(source, &content, &resources)? else {
+            return match self.copy_value(
+                source,
+                target,
+                &Object::Dictionary(dict.clone()),
+                depth + 1,
+            )? {
+                Object::Dictionary(copied) => Ok(copied),
+                _ => unreachable!("dictionary copy returned non-dictionary"),
+            };
+        };
+
+        let mut copied = Dictionary::new();
+        for (key, value) in dict.iter() {
+            if key.as_slice() == b"Resources" {
+                match self.copy_pruned_resources(source, target, &resources, &used, depth + 1)? {
+                    Some(pruned) => copied.set(key.clone(), pruned),
+                    None => {
+                        copied.set(
+                            key.clone(),
+                            self.copy_value(source, target, value, depth + 1)?,
+                        );
+                    }
+                }
+            } else {
+                copied.set(
+                    key.clone(),
+                    self.copy_value(source, target, value, depth + 1)?,
+                );
+            }
+        }
+        Ok(copied)
+    }
+
+    fn copy_resource_value(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        value: &Object,
+        depth: usize,
+    ) -> Result<Object> {
+        let previous = self.prune_nested_resources;
+        self.prune_nested_resources = true;
+        let result = self.copy_value(source, target, value, depth);
+        self.prune_nested_resources = previous;
+        result
+    }
+
+    fn resolve_dictionary<'a>(
+        &mut self,
+        source: &impl ObjectSource,
+        value: &'a Object,
+    ) -> Result<Option<ResolvedDictionary<'a>>> {
+        match value {
+            Object::Dictionary(dict) => Ok(Some(ResolvedDictionary::Borrowed(dict))),
+            Object::Reference(id) => {
+                if let Some(cached) = self.dictionary_cache.get(id) {
+                    return Ok(Some(ResolvedDictionary::Shared(Rc::clone(cached))));
+                }
+                let object = match source.get_object_value(*id) {
+                    Ok(object) => object,
+                    Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
+                    Err(err) => return Err(PdfOpsError::Pdf(err)),
+                };
+                let Some(dict) = object.as_dict().ok().cloned() else {
+                    return Ok(None);
+                };
+                let dict = Rc::new(dict);
+                self.dictionary_cache.insert(*id, Rc::clone(&dict));
+                Ok(Some(ResolvedDictionary::Shared(dict)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn should_prune_resources(
+        &mut self,
+        source: &impl ObjectSource,
+        resources: &Dictionary,
+    ) -> Result<bool> {
+        let font_count = self.resource_name_count(source, resources, b"Font")?;
+        let xobject_count = self.resource_name_count(source, resources, b"XObject")?;
+        Ok(font_count + xobject_count > RESOURCE_PRUNE_MIN_NAMES)
+    }
+
+    fn resource_name_count(
+        &mut self,
+        source: &impl ObjectSource,
+        resources: &Dictionary,
+        resource_type: &[u8],
+    ) -> Result<usize> {
+        let Ok(value) = resources.get(resource_type) else {
+            return Ok(0);
+        };
+        Ok(self
+            .resolve_dictionary(source, value)?
+            .map_or(0, |dict| dict.len()))
+    }
+}
+
+enum ResolvedDictionary<'a> {
+    Borrowed(&'a Dictionary),
+    Shared(Rc<Dictionary>),
+}
+
+impl Deref for ResolvedDictionary<'_> {
+    type Target = Dictionary;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(dict) => dict,
+            Self::Shared(dict) => dict,
+        }
+    }
+}
+
+fn check_copy_depth(depth: usize) -> Result<()> {
+    if depth > MAX_COPY_DEPTH {
+        return Err(PdfOpsError::InvalidStructure(format!(
+            "PDF object nesting exceeds maximum copy depth of {MAX_COPY_DEPTH}"
+        )));
+    }
+    Ok(())
+}
+
+fn restore_object_mapping(
+    object_map: &mut BTreeMap<ObjectId, ObjectId>,
+    old_id: ObjectId,
+    previous: Option<ObjectId>,
+) {
+    if let Some(previous) = previous {
+        object_map.insert(old_id, previous);
+    } else {
+        object_map.remove(&old_id);
+    }
+}
+
+fn is_form_xobject(dict: &Dictionary) -> bool {
+    dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
+}
+
+pub(crate) fn copy_pages(
+    source: &impl ObjectSource,
+    target: &mut Document,
+    page_ids: &[ObjectId],
+) -> Result<Vec<ObjectId>> {
+    let mut copied_pages = Vec::with_capacity(page_ids.len());
+    // Annotation preservation is intentionally deferred because annotation
+    // dictionaries often contain page/document backreferences that need
+    // careful remapping.
+    let mut context = CopyContext::new(CopyOptions::default());
+
+    for page_id in page_ids {
+        copied_pages.push(context.copy_page(source, target, *page_id)?);
+    }
+
+    Ok(copied_pages)
+}
+
+pub(crate) fn resolve_page_ids(
+    pages: &BTreeMap<u32, ObjectId>,
+    page_numbers: &[usize],
+) -> Result<Vec<ObjectId>> {
+    let mut page_ids = Vec::with_capacity(page_numbers.len());
+    for page_number in page_numbers {
+        let page_key = u32::try_from(*page_number).map_err(|_| {
+            PdfOpsError::InvalidStructure(format!(
+                "page {page_number} cannot be represented by lopdf"
+            ))
+        })?;
+        let page_id = pages
+            .get(&page_key)
+            .copied()
+            .ok_or_else(|| PdfOpsError::InvalidStructure(format!("missing page {page_number}")))?;
+        page_ids.push(page_id);
+    }
+    Ok(page_ids)
+}
+
+fn inherited_attr(
+    source: &impl ObjectSource,
+    page_id: ObjectId,
+    key: &[u8],
+) -> Result<Option<Object>> {
+    let mut current = page_id;
+    let mut visited = BTreeSet::new();
+
+    loop {
+        if !visited.insert(current) {
+            return Err(PdfOpsError::InvalidStructure(
+                "cycle detected while resolving inherited page attributes".into(),
+            ));
+        }
+
+        let object = match source.get_object_value(current) {
+            Ok(object) => object,
+            Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
+            Err(err) => return Err(PdfOpsError::Pdf(err)),
+        };
+        let dict = object.as_dict().map_err(|_| {
+            PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
+        })?;
+        if let Ok(value) = dict.get(key) {
+            return Ok(Some(value.clone()));
+        }
+        match dict.get(b"Parent") {
+            Ok(Object::Reference(parent)) => current = *parent,
+            Ok(_) => {
+                return Err(PdfOpsError::InvalidStructure(
+                    "page tree parent is not a reference".into(),
+                ));
+            }
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lopdf::{Document, Object};
+
+    use super::{CopyContext, CopyOptions, MAX_COPY_DEPTH};
+    use crate::PdfOpsError;
+
+    #[test]
+    fn rejects_deep_acyclic_reference_chain_before_stack_overflow() {
+        let mut source = Document::with_version("1.7");
+        for idx in 1..=(MAX_COPY_DEPTH + 4) {
+            let id = (idx as u32, 0);
+            let next_id = ((idx + 1) as u32, 0);
+            source
+                .objects
+                .insert(id, Object::Array(vec![Object::Reference(next_id)]));
+        }
+        source
+            .objects
+            .insert(((MAX_COPY_DEPTH + 5) as u32, 0), Object::Null);
+
+        let mut target = Document::with_version("1.7");
+        let mut context = CopyContext::new(CopyOptions::default());
+        let error = context
+            .copy_object(&source, &mut target, (1, 0))
+            .unwrap_err();
+
+        assert!(matches!(error, PdfOpsError::InvalidStructure(_)));
+    }
+}

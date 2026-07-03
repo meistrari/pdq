@@ -1,0 +1,217 @@
+use std::{collections::BTreeSet, num::ParseIntError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageRangeGroup {
+    raw: String,
+}
+
+impl PageRangeGroup {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, PageRangeError> {
+        let raw = raw.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(PageRangeError::EmptyGroup);
+        }
+        if trimmed.contains(';') {
+            return Err(PageRangeError::GroupSeparator);
+        }
+        for part in trimmed.split(',') {
+            parse_part(part.trim())?;
+        }
+        Ok(Self {
+            raw: trimmed.to_string(),
+        })
+    }
+
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    pub fn resolve(&self, page_count: usize) -> Result<Vec<usize>, PageRangeError> {
+        if page_count == 0 {
+            return Err(PageRangeError::NoPages);
+        }
+
+        let mut pages = Vec::new();
+        for part in self.raw.split(',') {
+            append_part(part.trim(), page_count, &mut pages)?;
+        }
+        Ok(pages)
+    }
+}
+
+pub fn parse_groups(groups: &[String]) -> Result<Vec<PageRangeGroup>, PageRangeError> {
+    if groups.is_empty() {
+        return Err(PageRangeError::EmptyGroup);
+    }
+    groups
+        .iter()
+        .map(|group| PageRangeGroup::parse(group.clone()))
+        .collect()
+}
+
+pub fn parse_group_string(raw: &str) -> Result<Vec<PageRangeGroup>, PageRangeError> {
+    raw.split(';')
+        .map(|group| PageRangeGroup::parse(group.to_string()))
+        .collect()
+}
+
+fn parse_part(part: &str) -> Result<(), PageRangeError> {
+    if part.is_empty() {
+        return Err(PageRangeError::EmptyRange);
+    }
+    if let Some((start, end)) = part.split_once('-') {
+        parse_endpoint(start)?;
+        parse_endpoint(end)?;
+        return Ok(());
+    }
+    parse_endpoint(part)
+}
+
+fn append_part(
+    part: &str,
+    page_count: usize,
+    pages: &mut Vec<usize>,
+) -> Result<(), PageRangeError> {
+    if let Some((start, end)) = part.split_once('-') {
+        let start = resolve_endpoint(start, page_count)?;
+        let end = resolve_endpoint(end, page_count)?;
+        if start <= end {
+            pages.extend(start..=end);
+        } else {
+            pages.extend((end..=start).rev());
+        }
+        return Ok(());
+    }
+    pages.push(resolve_endpoint(part, page_count)?);
+    Ok(())
+}
+
+fn parse_endpoint(endpoint: &str) -> Result<(), PageRangeError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(PageRangeError::EmptyRange);
+    }
+    if endpoint == "z" {
+        return Ok(());
+    }
+    if let Some(rest) = endpoint.strip_prefix('r') {
+        parse_positive(rest)?;
+        return Ok(());
+    }
+    parse_positive(endpoint)?;
+    Ok(())
+}
+
+fn resolve_endpoint(endpoint: &str, page_count: usize) -> Result<usize, PageRangeError> {
+    let endpoint = endpoint.trim();
+    if endpoint == "z" {
+        return Ok(page_count);
+    }
+    let resolved = if let Some(rest) = endpoint.strip_prefix('r') {
+        let reverse = parse_positive(rest)?;
+        if reverse > page_count {
+            return Err(PageRangeError::OutOfBounds {
+                page: reverse,
+                page_count,
+            });
+        }
+        page_count + 1 - reverse
+    } else {
+        parse_positive(endpoint)?
+    };
+
+    if resolved > page_count {
+        return Err(PageRangeError::OutOfBounds {
+            page: resolved,
+            page_count,
+        });
+    }
+    Ok(resolved)
+}
+
+fn parse_positive(raw: &str) -> Result<usize, PageRangeError> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(PageRangeError::InvalidNumber)?;
+    if value == 0 {
+        return Err(PageRangeError::ZeroPage);
+    }
+    Ok(value)
+}
+
+pub fn dedupe_preserving_order(pages: &[usize]) -> Vec<usize> {
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for page in pages {
+        if seen.insert(*page) {
+            result.push(*page);
+        }
+    }
+    result
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PageRangeError {
+    #[error("page range group must not be empty")]
+    EmptyGroup,
+
+    #[error("page range must not be empty")]
+    EmptyRange,
+
+    #[error("page range groups must be passed separately; found ';' inside a group")]
+    GroupSeparator,
+
+    #[error("page numbers start at 1")]
+    ZeroPage,
+
+    #[error("invalid page number: {0}")]
+    InvalidNumber(ParseIntError),
+
+    #[error("page {page} is out of bounds for a document with {page_count} pages")]
+    OutOfBounds { page: usize, page_count: usize },
+
+    #[error("document has no pages")]
+    NoPages,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dedupe_preserving_order, PageRangeGroup};
+
+    #[test]
+    fn resolves_forward_ranges_and_lists() {
+        let group = PageRangeGroup::parse("1-3,5").unwrap();
+
+        assert_eq!(group.resolve(6).unwrap(), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn resolves_reverse_pages_and_z() {
+        let group = PageRangeGroup::parse("r1,r3-r1,1-z").unwrap();
+
+        assert_eq!(group.resolve(4).unwrap(), vec![4, 2, 3, 4, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_empty_groups() {
+        assert!(PageRangeGroup::parse("").is_err());
+    }
+
+    #[test]
+    fn rejects_group_separator_inside_group() {
+        assert!(PageRangeGroup::parse("1-2;3-4").is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_pages() {
+        let group = PageRangeGroup::parse("1-5").unwrap();
+
+        assert!(group.resolve(3).is_err());
+    }
+
+    #[test]
+    fn dedupes_without_sorting() {
+        assert_eq!(dedupe_preserving_order(&[3, 1, 3, 2, 1]), vec![3, 1, 2]);
+    }
+}
