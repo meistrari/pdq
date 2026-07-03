@@ -1,4 +1,4 @@
-use std::{fs::File, path::Path};
+use std::{fs, fs::File, os::unix::fs::MetadataExt, path::Path};
 
 use lopdf::{Document, LoadOptions};
 use memmap2::{Mmap, MmapOptions};
@@ -32,4 +32,14 @@ pub(crate) fn map_file(path: &Path) -> Result<Mmap> {
     // The mmap is read-only. Concurrent truncation of the input can still
     // SIGBUS the process, which is the standard memmap tradeoff.
     Ok(unsafe { MmapOptions::new().map(&file)? })
+}
+
+pub(crate) fn same_file(left: &Path, right: &Path) -> Result<bool> {
+    let left = fs::metadata(left)?;
+    let right = match fs::metadata(right) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }

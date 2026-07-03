@@ -1,9 +1,10 @@
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
+    process,
     rc::Rc,
 };
 
@@ -16,6 +17,79 @@ use crate::{
 
 const INHERITABLE_PAGE_ATTRS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 const MAX_COPY_DEPTH: usize = 256;
+
+pub(crate) fn stream_pdf_atomically(
+    output: &Path,
+    fill: impl FnOnce(&mut StreamingPdfWriter) -> Result<()>,
+) -> Result<()> {
+    let temp_output = temp_output_path(output)?;
+    let result = stream_pdf_to_path(&temp_output, fill);
+    match result {
+        Ok(()) => {
+            fs::rename(&temp_output, output)?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp_output);
+            Err(err)
+        }
+    }
+}
+
+fn stream_pdf_to_path(
+    output: &Path,
+    fill: impl FnOnce(&mut StreamingPdfWriter) -> Result<()>,
+) -> Result<()> {
+    let mut writer = StreamingPdfWriter::create(output)?;
+    fill(&mut writer)?;
+    writer.finish()
+}
+
+pub(crate) fn copy_all_pages_streaming(
+    writer: &mut StreamingPdfWriter,
+    source: &impl ObjectSource,
+    page_ids: &[ObjectId],
+) -> Result<()> {
+    let copied_pages = {
+        let mut context = StreamingCopyContext::new(
+            writer,
+            CopyOptions {
+                prune_resources: false,
+                ..CopyOptions::default()
+            },
+        );
+        context.copy_pages(source, page_ids)?
+    };
+    writer.extend_pages(copied_pages);
+    Ok(())
+}
+
+fn temp_output_path(output: &Path) -> Result<PathBuf> {
+    let directory = output.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("pdq-output");
+    for attempt in 0..1000 {
+        let candidate = directory.join(format!(".{file_name}.pdq-{}-{attempt}.tmp", process::id()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => {
+                fs::remove_file(&candidate)?;
+                return Ok(candidate);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(PdfOpsError::InvalidStructure(format!(
+        "could not allocate temporary output next to {}",
+        output.display()
+    )))
+}
 
 pub(crate) struct StreamingPdfWriter {
     output: CountingWriter<BufWriter<File>>,

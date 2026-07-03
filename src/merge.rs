@@ -1,17 +1,15 @@
 use std::{
-    fs::{self, OpenOptions},
-    os::unix::fs::MetadataExt,
+    fs,
     path::{Path, PathBuf},
-    process,
 };
 
 use crate::{
     copy::{copy_pages_with_options, CopyOptions},
     lazy::LazyPdf,
-    load::map_file,
+    load::{map_file, same_file},
     range::{PageRangeError, PageRangeGroup},
     split::{empty_document, finish_pages},
-    write::{StreamingCopyContext, StreamingPdfWriter},
+    write::{copy_all_pages_streaming, stream_pdf_atomically},
     PdfOpsError, Result,
 };
 
@@ -85,72 +83,18 @@ pub fn merge_with_options(
 }
 
 fn merge_whole_inputs_streaming(inputs: &[MergeInput], output: &Path) -> Result<()> {
-    let temp_output = temp_output_path(output)?;
-    let result = merge_whole_inputs_streaming_to_path(inputs, &temp_output);
-    match result {
-        Ok(()) => {
-            fs::rename(&temp_output, output)?;
-            Ok(())
-        }
-        Err(err) => {
-            let _ = fs::remove_file(&temp_output);
-            Err(err)
-        }
-    }
-}
-
-fn merge_whole_inputs_streaming_to_path(inputs: &[MergeInput], output: &Path) -> Result<()> {
-    let mut writer = StreamingPdfWriter::create(output)?;
-
-    for input in inputs {
-        let mmap = map_file(&input.path)?;
-        let source = LazyPdf::parse(&mmap, &input.path)?;
-        let page_ids = source.page_ids()?;
-        if page_ids.is_empty() {
-            return Err(PdfOpsError::Range(PageRangeError::NoPages));
-        }
-
-        let copied_pages = {
-            let mut context = StreamingCopyContext::new(
-                &mut writer,
-                CopyOptions {
-                    prune_resources: false,
-                    ..CopyOptions::default()
-                },
-            );
-            context.copy_pages(&source, &page_ids)?
-        };
-        writer.extend_pages(copied_pages);
-    }
-
-    writer.finish()
-}
-
-fn temp_output_path(output: &Path) -> Result<PathBuf> {
-    let directory = output.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("pdq-output");
-    for attempt in 0..1000 {
-        let candidate = directory.join(format!(".{file_name}.pdq-{}-{attempt}.tmp", process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(_) => {
-                fs::remove_file(&candidate)?;
-                return Ok(candidate);
+    stream_pdf_atomically(output, |writer| {
+        for input in inputs {
+            let mmap = map_file(&input.path)?;
+            let source = LazyPdf::parse(&mmap, &input.path)?;
+            let page_ids = source.page_ids()?;
+            if page_ids.is_empty() {
+                return Err(PdfOpsError::Range(PageRangeError::NoPages));
             }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err.into()),
+            copy_all_pages_streaming(writer, &source, &page_ids)?;
         }
-    }
-    Err(PdfOpsError::InvalidStructure(format!(
-        "could not allocate temporary output next to {}",
-        output.display()
-    )))
+        Ok(())
+    })
 }
 
 fn copy_whole_input(input: &MergeInput, output: &Path) -> Result<()> {
@@ -161,16 +105,6 @@ fn copy_whole_input(input: &MergeInput, output: &Path) -> Result<()> {
     }
     fs::copy(&input.path, output)?;
     Ok(())
-}
-
-fn same_file(left: &Path, right: &Path) -> Result<bool> {
-    let left = fs::metadata(left)?;
-    let right = match fs::metadata(right) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err.into()),
-    };
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }
 
 fn resolve_merge_page_ids(

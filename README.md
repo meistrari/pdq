@@ -29,9 +29,11 @@ The runtime implementation must remain qpdf-free.
 ## Benchmark Snapshot
 
 Measured on 2026-07-03 with local PDFs identified only by page count. Wall time
-is `hyperfine --warmup 1 --runs 5` mean plus standard deviation. RSS is maximum
-resident set size from a separate single `/usr/bin/time -l` run, so use it as a
-memory-order signal rather than a statistically averaged value.
+is `hyperfine --warmup 1 --runs 5` mean plus standard deviation, except the
+2,642-page split-pages row, which uses a focused `--warmup 2 --runs 7` rerun
+because the full matrix had a filesystem outlier. RSS is maximum resident set
+size from a separate single `/usr/bin/time -l` run, so use it as a memory-order
+signal rather than a statistically averaged value.
 
 Completed outputs were validated by page count and `qpdf --warning-exit-0
 --check`. Split scenarios validated the first and last output file. qpdf used
@@ -39,11 +41,12 @@ Completed outputs were validated by page count and `qpdf --warning-exit-0
 
 | Scenario | pdq | qpdf | Market runner-up | Notes |
 | --- | ---: | ---: | ---: | --- |
-| 12,732-page split into single-page PDFs | 1.75s +/- 0.05s / 241 MB | 4.27s +/- 0.07s / 217 MB | Poppler >60s timeout | Poppler produced 3 partial outputs before timeout. |
-| 2,642-page split into single-page PDFs | 0.55s +/- 0.03s / 146 MB | >60s timeout | Poppler >60s timeout | qpdf produced 727 partial outputs; Poppler produced 59. |
-| 12,732-page full rewrite | 0.56s +/- 0.04s / 1.03 GB | 0.91s +/- 0.03s / 221 MB | MuPDF 0.54s +/- 0.02s / 71 MB | MuPDF narrowly wins wall time; pdq is close but uses more memory. |
-| 2,642-page full rewrite | 1.07s +/- 0.01s / 261 MB | 0.17s +/- 0.00s / 57 MB | MuPDF 0.11s +/- 0.00s / 24 MB | Small rewrite remains a qpdf/MuPDF win. |
-| 15,374-page merge | 0.71s +/- 0.01s / 230 MB | 1.36s +/- 0.04s / 495 MB | MuPDF 8.64s +/- 0.22s / 390 MB | pdq uses streaming output for whole-document merge. |
+| 12,732-page split into single-page PDFs | 2.19s +/- 0.28s / 234 MB | 4.65s +/- 0.32s / 207 MB | not measured | pdq still wins, but this run was noisier than the previous snapshot. |
+| 2,642-page split into single-page PDFs | 0.58s +/- 0.05s / 142 MB | >60s timeout | not measured | qpdf produced 712 partial outputs before timeout in the full matrix. |
+| 12,732-page split into two ranged PDFs | 0.49s +/- 0.01s | not measured | not measured | Control case for the `split()` LazyPdf migration. |
+| 12,732-page full rewrite | 0.67s +/- 0.01s / 220 MB | 1.00s +/- 0.08s / 211 MB | MuPDF 0.55s +/- 0.02s / 68 MB | MuPDF still wins wall time; pdq now avoids the old 1 GB RSS path. |
+| 2,642-page full rewrite | 0.12s +/- 0.00s / 40 MB | 0.17s +/- 0.00s / 56 MB | MuPDF 0.12s +/- 0.00s / 23 MB | `split 1-z` uses the streaming whole-document fast path. |
+| 15,374-page merge | 0.72s +/- 0.02s / 219 MB | 1.38s +/- 0.02s / 472 MB | MuPDF 8.67s +/- 0.15s / 371 MB | pdq uses streaming output for whole-document merge. |
 
 To reproduce the timing matrix:
 

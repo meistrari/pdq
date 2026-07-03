@@ -384,6 +384,172 @@ fn merge_whole_document_keeps_shared_page_resources() {
 }
 
 #[test]
+fn split_whole_document_fast_path_writes_all_pages() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("whole.pdf");
+
+    split(
+        &fixture("11-pages.pdf"),
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_written(&output);
+    QpdfValidator::detect().validate(&output, 11);
+}
+
+#[test]
+fn split_whole_document_keeps_shared_page_resources() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("shared-resources.pdf");
+    let output = temp.path().join("whole.pdf");
+
+    write_shared_resources_fixture(&input, false);
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_page_resources_in_document(
+        &output,
+        &QpdfValidator::detect(),
+        3,
+        1,
+        &["X0", "X1", "X2", "X3", "X4", "X5", "X6"],
+        &["F1"],
+    );
+}
+
+#[test]
+fn split_composite_identity_range_takes_fast_path() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("shared-resources.pdf");
+    let output = temp.path().join("whole-composite.pdf");
+
+    write_shared_resources_fixture(&input, false);
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-2,3-z").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_page_resources_in_document(
+        &output,
+        &QpdfValidator::detect(),
+        3,
+        1,
+        &["X0", "X1", "X2", "X3", "X4", "X5", "X6"],
+        &["F1"],
+    );
+}
+
+#[test]
+fn split_reordered_whole_document_uses_pruning_path() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("shared-resources.pdf");
+    let output = temp.path().join("reordered.pdf");
+
+    write_shared_resources_fixture(&input, false);
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("z-1").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_page_resources_in_document(&output, &QpdfValidator::detect(), 3, 1, &["X2"], &[]);
+}
+
+#[test]
+fn split_whole_document_in_place_rewrites_input() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("in-place.pdf");
+    fs::copy(fixture("11-pages.pdf"), &input).unwrap();
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: input.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_written(&input);
+    QpdfValidator::detect().validate(&input, 11);
+}
+
+#[test]
+fn split_ranged_in_place_falls_back_to_eager() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("in-place-range.pdf");
+    fs::copy(fixture("11-pages.pdf"), &input).unwrap();
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-3").unwrap(),
+            path: input.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_written(&input);
+    QpdfValidator::detect().validate(&input, 3);
+}
+
+#[test]
+fn split_whole_document_fast_path_overwrites_existing_output() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("existing.pdf");
+    fs::write(&output, b"not a pdf").unwrap();
+
+    split(
+        &fixture("11-pages.pdf"),
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_written(&output);
+    QpdfValidator::detect().validate(&output, 11);
+}
+
+#[test]
+fn split_treats_missing_references_as_null() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("dangling-reference.pdf");
+    let output = temp.path().join("dangling-output.pdf");
+
+    write_one_page_pdf_with_dangling_reference(&input);
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_written(&output);
+    QpdfValidator::detect().validate(&output, 1);
+}
+
+#[test]
 fn merge_selected_ranges_prunes_shared_page_resources() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("shared-resources.pdf");
