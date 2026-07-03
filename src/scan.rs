@@ -1,6 +1,7 @@
 use std::{
-    borrow::Cow,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    ops::Deref,
+    rc::Rc,
 };
 
 use lopdf::{content::Content, Dictionary, Object, ObjectId};
@@ -52,38 +53,60 @@ enum ResourceType {
     XObject,
 }
 
+struct ScanState<'a> {
+    dictionary_cache: &'a mut BTreeMap<ObjectId, Rc<Dictionary>>,
+    used_names_cache: &'a mut BTreeMap<ObjectId, Option<UsedNames>>,
+}
+
 pub(crate) fn collect_used_names(
     source: &impl ObjectSource,
     page: &Dictionary,
     resources: &Dictionary,
+    dictionary_cache: &mut BTreeMap<ObjectId, Rc<Dictionary>>,
+    used_names_cache: &mut BTreeMap<ObjectId, Option<UsedNames>>,
 ) -> Result<Option<UsedNames>> {
     let Some(content) = content_bytes(source, page)? else {
         return Ok(None);
     };
-    collect_used_names_from_bytes_with_options(source, &content, resources, false)
+    let mut state = ScanState {
+        dictionary_cache,
+        used_names_cache,
+    };
+    collect_used_names_from_bytes_with_options(source, None, &content, resources, &mut state, false)
 }
 
-pub(crate) fn collect_used_names_from_bytes(
+pub(crate) fn collect_used_names_from_stream(
     source: &impl ObjectSource,
+    stream_id: Option<ObjectId>,
     content: &[u8],
     resources: &Dictionary,
+    dictionary_cache: &mut BTreeMap<ObjectId, Rc<Dictionary>>,
+    used_names_cache: &mut BTreeMap<ObjectId, Option<UsedNames>>,
 ) -> Result<Option<UsedNames>> {
-    collect_used_names_from_bytes_with_options(source, content, resources, true)
+    let mut state = ScanState {
+        dictionary_cache,
+        used_names_cache,
+    };
+    collect_used_names_from_bytes_with_options(
+        source, stream_id, content, resources, &mut state, true,
+    )
 }
 
 fn collect_used_names_from_bytes_with_options(
     source: &impl ObjectSource,
+    stream_id: Option<ObjectId>,
     content: &[u8],
     resources: &Dictionary,
+    state: &mut ScanState<'_>,
     strict_own_form_failures: bool,
 ) -> Result<Option<UsedNames>> {
-    let Some(mut used) = scan_names(content) else {
+    let Some(mut used) = scan_names_cached(content, stream_id, state.used_names_cache) else {
         return Ok(None);
     };
-    if !all_named_resources_resolve(source, resources, b"Font", &used.fonts)? {
+    if !all_named_resources_resolve(source, resources, b"Font", &used.fonts, state)? {
         return Ok(None);
     }
-    if !all_named_resources_resolve(source, resources, b"XObject", &used.xobjects)? {
+    if !all_named_resources_resolve(source, resources, b"XObject", &used.xobjects, state)? {
         return Ok(None);
     }
     let mut visited = BTreeSet::new();
@@ -92,6 +115,7 @@ fn collect_used_names_from_bytes_with_options(
         resources,
         &mut used,
         &mut visited,
+        state,
         0,
         strict_own_form_failures,
     )? {
@@ -105,6 +129,7 @@ fn collect_form_names(
     resources: &Dictionary,
     used: &mut UsedNames,
     visited: &mut BTreeSet<ObjectId>,
+    state: &mut ScanState<'_>,
     depth: usize,
     strict_own_form_failures: bool,
 ) -> Result<bool> {
@@ -118,7 +143,8 @@ fn collect_form_names(
         if !seen_names.insert(name.clone()) {
             continue;
         }
-        let Some(xobject) = named_resource_object(source, resources, b"XObject", &name)? else {
+        let Some(xobject) = named_resource_object(source, resources, b"XObject", &name, state)?
+        else {
             return Ok(false);
         };
         let Some((id, stream)) = stream_object(source, &xobject)? else {
@@ -139,7 +165,7 @@ fn collect_form_names(
             }
             continue;
         };
-        let Some(form_used) = scan_names(&content) else {
+        let Some(form_used) = scan_names_cached(&content, id, state.used_names_cache) else {
             if strict_own_form_failures {
                 return Ok(false);
             }
@@ -147,20 +173,25 @@ fn collect_form_names(
         };
 
         if let Ok(form_resources_obj) = stream.dict.get(b"Resources") {
-            let Some(form_resources) = dictionary_object(source, form_resources_obj)? else {
+            let Some(form_resources) = dictionary_object(source, form_resources_obj, state)? else {
                 if strict_own_form_failures {
                     return Ok(false);
                 }
                 continue;
             };
-            if !all_named_resources_resolve(source, &form_resources, b"Font", &form_used.fonts)?
-                || !all_named_resources_resolve(
-                    source,
-                    &form_resources,
-                    b"XObject",
-                    &form_used.xobjects,
-                )?
-            {
+            if !all_named_resources_resolve(
+                source,
+                &form_resources,
+                b"Font",
+                &form_used.fonts,
+                state,
+            )? || !all_named_resources_resolve(
+                source,
+                &form_resources,
+                b"XObject",
+                &form_used.xobjects,
+                state,
+            )? {
                 return Ok(false);
             }
             let mut nested = form_used;
@@ -169,6 +200,7 @@ fn collect_form_names(
                 &form_resources,
                 &mut nested,
                 visited,
+                state,
                 depth + 1,
                 strict_own_form_failures,
             )?;
@@ -208,6 +240,22 @@ fn scan_names(data: &[u8]) -> Option<UsedNames> {
     }
 
     Some(used)
+}
+
+fn scan_names_cached(
+    data: &[u8],
+    stream_id: Option<ObjectId>,
+    used_names_cache: &mut BTreeMap<ObjectId, Option<UsedNames>>,
+) -> Option<UsedNames> {
+    let Some(stream_id) = stream_id else {
+        return scan_names(data);
+    };
+    if let Some(cached) = used_names_cache.get(&stream_id) {
+        return cached.clone();
+    }
+    let used = scan_names(data);
+    used_names_cache.insert(stream_id, used.clone());
+    used
 }
 
 fn resource_type_for_operator(operator: &str) -> Option<ResourceType> {
@@ -281,8 +329,9 @@ fn named_resource_object(
     resources: &Dictionary,
     resource_type: &[u8],
     name: &[u8],
+    state: &mut ScanState<'_>,
 ) -> Result<Option<Object>> {
-    let Some(dict) = resource_dictionary(source, resources, resource_type)? else {
+    let Some(dict) = resource_dictionary(source, resources, resource_type, state)? else {
         return Ok(None);
     };
     let Ok(value) = dict.get(name) else {
@@ -295,28 +344,54 @@ fn resource_dictionary<'a>(
     source: &impl ObjectSource,
     resources: &'a Dictionary,
     resource_type: &[u8],
-) -> Result<Option<Cow<'a, Dictionary>>> {
+    state: &mut ScanState<'_>,
+) -> Result<Option<ResolvedDictionary<'a>>> {
     let Ok(value) = resources.get(resource_type) else {
         return Ok(None);
     };
-    dictionary_object(source, value)
+    dictionary_object(source, value, state)
 }
 
 fn dictionary_object<'a>(
     source: &impl ObjectSource,
     value: &'a Object,
-) -> Result<Option<Cow<'a, Dictionary>>> {
+    state: &mut ScanState<'_>,
+) -> Result<Option<ResolvedDictionary<'a>>> {
     match value {
-        Object::Dictionary(dict) => Ok(Some(Cow::Borrowed(dict))),
+        Object::Dictionary(dict) => Ok(Some(ResolvedDictionary::Borrowed(dict))),
         Object::Reference(id) => {
+            if let Some(cached) = state.dictionary_cache.get(id) {
+                return Ok(Some(ResolvedDictionary::Shared(Rc::clone(cached))));
+            }
             let object = match source.get_object_value(*id) {
                 Ok(object) => object,
                 Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
                 Err(err) => return Err(err.into()),
             };
-            Ok(object.as_dict().ok().cloned().map(Cow::Owned))
+            let Some(dict) = object.as_dict().ok().cloned() else {
+                return Ok(None);
+            };
+            let dict = Rc::new(dict);
+            state.dictionary_cache.insert(*id, Rc::clone(&dict));
+            Ok(Some(ResolvedDictionary::Shared(dict)))
         }
         _ => Ok(None),
+    }
+}
+
+enum ResolvedDictionary<'a> {
+    Borrowed(&'a Dictionary),
+    Shared(Rc<Dictionary>),
+}
+
+impl Deref for ResolvedDictionary<'_> {
+    type Target = Dictionary;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(dict) => dict,
+            Self::Shared(dict) => dict,
+        }
     }
 }
 
@@ -347,11 +422,12 @@ fn all_named_resources_resolve(
     resources: &Dictionary,
     resource_type: &[u8],
     names: &BTreeSet<Vec<u8>>,
+    state: &mut ScanState<'_>,
 ) -> Result<bool> {
     if names.is_empty() {
         return Ok(true);
     }
-    let Some(dict) = resource_dictionary(source, resources, resource_type)? else {
+    let Some(dict) = resource_dictionary(source, resources, resource_type, state)? else {
         return Ok(false);
     };
     Ok(names.iter().all(|name| dict.has(name)))

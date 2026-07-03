@@ -42,6 +42,8 @@ impl Default for CopyOptions {
 pub struct CopyContext {
     object_map: BTreeMap<ObjectId, ObjectId>,
     dictionary_cache: BTreeMap<ObjectId, Rc<Dictionary>>,
+    inherited_attrs_cache: BTreeMap<ObjectId, Rc<InheritedPageAttrs>>,
+    used_names_cache: BTreeMap<ObjectId, Option<UsedNames>>,
     selected_pages: BTreeSet<ObjectId>,
     options: CopyOptions,
     prune_nested_resources: bool,
@@ -52,6 +54,8 @@ impl CopyContext {
         Self {
             object_map: BTreeMap::new(),
             dictionary_cache: BTreeMap::new(),
+            inherited_attrs_cache: BTreeMap::new(),
+            used_names_cache: BTreeMap::new(),
             selected_pages: BTreeSet::new(),
             options,
             prune_nested_resources: false,
@@ -151,11 +155,33 @@ impl CopyContext {
             }
             Err(err) => return Err(PdfOpsError::Pdf(err)),
         };
-        let copied = match object.as_ref() {
-            Object::Dictionary(dict) if dict.has_type(b"Page") => Object::Dictionary(
-                self.copy_page_dictionary(source, target, old_id, dict, depth + 1)?,
-            ),
-            _ => self.copy_value(source, target, object.as_ref(), depth + 1)?,
+        let copied = match object {
+            Cow::Borrowed(object) => match object {
+                Object::Dictionary(dict) if dict.has_type(b"Page") => Object::Dictionary(
+                    self.copy_page_dictionary(source, target, old_id, dict, depth + 1)?,
+                ),
+                Object::Stream(stream) => Object::Stream(self.copy_stream(
+                    source,
+                    target,
+                    stream.clone(),
+                    Some(old_id),
+                    depth + 1,
+                )?),
+                _ => self.copy_value(source, target, object, depth + 1)?,
+            },
+            Cow::Owned(object) => match object {
+                Object::Dictionary(dict) if dict.has_type(b"Page") => Object::Dictionary(
+                    self.copy_page_dictionary(source, target, old_id, &dict, depth + 1)?,
+                ),
+                Object::Stream(stream) => Object::Stream(self.copy_stream(
+                    source,
+                    target,
+                    stream,
+                    Some(old_id),
+                    depth + 1,
+                )?),
+                object => self.copy_owned_value(source, target, object, depth + 1)?,
+            },
         };
         target.objects.insert(new_id, copied);
         Ok(new_id)
@@ -195,7 +221,7 @@ impl CopyContext {
             if copied.has(key) {
                 continue;
             }
-            if let Some(value) = inherited_attr(source, old_page_id, key)? {
+            if let Some(value) = self.inherited_attr(source, old_page_id, page, key)? {
                 if key == b"Resources" {
                     copied.set(
                         key.to_vec(),
@@ -240,7 +266,14 @@ impl CopyContext {
         if !self.should_prune_resources(source, &resources)? {
             return self.copy_value(source, target, value, depth + 1);
         }
-        let Some(used) = scan::collect_used_names(source, page, &resources)? else {
+        let Some(used) = scan::collect_used_names(
+            source,
+            page,
+            &resources,
+            &mut self.dictionary_cache,
+            &mut self.used_names_cache,
+        )?
+        else {
             return self.copy_value(source, target, value, depth + 1);
         };
         match self.copy_pruned_resources(source, target, &resources, &used, depth + 1)? {
@@ -316,14 +349,71 @@ impl CopyContext {
                 }
                 Ok(Object::Dictionary(copied))
             }
-            Object::Stream(stream) => {
-                let mut cloned = stream.clone();
-                cloned.dict =
-                    self.copy_stream_dictionary(source, target, stream, &cloned.dict, depth + 1)?;
-                Ok(Object::Stream(cloned))
-            }
+            Object::Stream(stream) => Ok(Object::Stream(self.copy_stream(
+                source,
+                target,
+                stream.clone(),
+                None,
+                depth + 1,
+            )?)),
             _ => Ok(value.clone()),
         }
+    }
+
+    fn copy_owned_value(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        value: Object,
+        depth: usize,
+    ) -> Result<Object> {
+        check_copy_depth(depth)?;
+        match value {
+            Object::Reference(id) => Ok(Object::Reference(self.copy_object_at_depth(
+                source,
+                target,
+                id,
+                depth + 1,
+            )?)),
+            Object::Array(items) => {
+                let mut copied = Vec::with_capacity(items.len());
+                for item in items {
+                    copied.push(self.copy_owned_value(source, target, item, depth + 1)?);
+                }
+                Ok(Object::Array(copied))
+            }
+            Object::Dictionary(dict) => {
+                let mut copied = lopdf::Dictionary::new();
+                for (key, value) in dict {
+                    copied.set(
+                        key,
+                        self.copy_owned_value(source, target, value, depth + 1)?,
+                    );
+                }
+                Ok(Object::Dictionary(copied))
+            }
+            Object::Stream(stream) => Ok(Object::Stream(self.copy_stream(
+                source,
+                target,
+                stream,
+                None,
+                depth + 1,
+            )?)),
+            value => Ok(value),
+        }
+    }
+
+    fn copy_stream(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        mut stream: lopdf::Stream,
+        stream_id: Option<ObjectId>,
+        depth: usize,
+    ) -> Result<lopdf::Stream> {
+        stream.dict =
+            self.copy_stream_dictionary(source, target, &stream, &stream.dict, stream_id, depth)?;
+        Ok(stream)
     }
 
     fn copy_stream_dictionary(
@@ -332,6 +422,7 @@ impl CopyContext {
         target: &mut Document,
         stream: &lopdf::Stream,
         dict: &Dictionary,
+        stream_id: Option<ObjectId>,
         depth: usize,
     ) -> Result<Dictionary> {
         check_copy_depth(depth)?;
@@ -380,7 +471,15 @@ impl CopyContext {
                 _ => unreachable!("dictionary copy returned non-dictionary"),
             };
         };
-        let Some(used) = scan::collect_used_names_from_bytes(source, &content, &resources)? else {
+        let Some(used) = scan::collect_used_names_from_stream(
+            source,
+            stream_id,
+            &content,
+            &resources,
+            &mut self.dictionary_cache,
+            &mut self.used_names_cache,
+        )?
+        else {
             return match self.copy_value(
                 source,
                 target,
@@ -478,6 +577,75 @@ impl CopyContext {
             .resolve_dictionary(source, value)?
             .map_or(0, |dict| dict.len()))
     }
+
+    fn inherited_attr(
+        &mut self,
+        source: &impl ObjectSource,
+        page_id: ObjectId,
+        page: &Dictionary,
+        key: &[u8],
+    ) -> Result<Option<Object>> {
+        if let Ok(value) = page.get(key) {
+            return Ok(Some(value.clone()));
+        }
+
+        let mut current = match page.get(b"Parent") {
+            Ok(Object::Reference(parent)) => *parent,
+            Ok(_) => {
+                return Err(PdfOpsError::InvalidStructure(
+                    "page tree parent is not a reference".into(),
+                ));
+            }
+            Err(_) => return Ok(None),
+        };
+        let mut visited = BTreeSet::from([page_id]);
+
+        loop {
+            if !visited.insert(current) {
+                return Err(PdfOpsError::InvalidStructure(
+                    "cycle detected while resolving inherited page attributes".into(),
+                ));
+            }
+
+            let Some(attrs) = self.inherited_attrs(source, current)? else {
+                return Ok(None);
+            };
+            if let Some(value) = attrs.get(key) {
+                return Ok(Some(value.clone()));
+            }
+            match attrs.parent {
+                ParentRef::Reference(parent) => current = parent,
+                ParentRef::Missing => return Ok(None),
+                ParentRef::Invalid => {
+                    return Err(PdfOpsError::InvalidStructure(
+                        "page tree parent is not a reference".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn inherited_attrs(
+        &mut self,
+        source: &impl ObjectSource,
+        id: ObjectId,
+    ) -> Result<Option<Rc<InheritedPageAttrs>>> {
+        if let Some(attrs) = self.inherited_attrs_cache.get(&id) {
+            return Ok(Some(Rc::clone(attrs)));
+        }
+
+        let object = match source.get_object_value(id) {
+            Ok(object) => object,
+            Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
+            Err(err) => return Err(PdfOpsError::Pdf(err)),
+        };
+        let dict = object.as_dict().map_err(|_| {
+            PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
+        })?;
+        let attrs = Rc::new(InheritedPageAttrs::from_dict(dict));
+        self.inherited_attrs_cache.insert(id, Rc::clone(&attrs));
+        Ok(Some(attrs))
+    }
 }
 
 enum ResolvedDictionary<'a> {
@@ -494,6 +662,49 @@ impl Deref for ResolvedDictionary<'_> {
             Self::Shared(dict) => dict,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct InheritedPageAttrs {
+    resources: Option<Object>,
+    media_box: Option<Object>,
+    crop_box: Option<Object>,
+    rotate: Option<Object>,
+    parent: ParentRef,
+}
+
+impl InheritedPageAttrs {
+    fn from_dict(dict: &Dictionary) -> Self {
+        Self {
+            resources: dict.get(b"Resources").ok().cloned(),
+            media_box: dict.get(b"MediaBox").ok().cloned(),
+            crop_box: dict.get(b"CropBox").ok().cloned(),
+            rotate: dict.get(b"Rotate").ok().cloned(),
+            parent: match dict.get(b"Parent") {
+                Ok(Object::Reference(parent)) => ParentRef::Reference(*parent),
+                Ok(_) => ParentRef::Invalid,
+                Err(_) => ParentRef::Missing,
+            },
+        }
+    }
+
+    fn get(&self, key: &[u8]) -> Option<&Object> {
+        match key {
+            b"Resources" => self.resources.as_ref(),
+            b"MediaBox" => self.media_box.as_ref(),
+            b"CropBox" => self.crop_box.as_ref(),
+            b"Rotate" => self.rotate.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum ParentRef {
+    Reference(ObjectId),
+    #[default]
+    Missing,
+    Invalid,
 }
 
 fn check_copy_depth(depth: usize) -> Result<()> {
@@ -557,44 +768,6 @@ pub(crate) fn resolve_page_ids(
         page_ids.push(page_id);
     }
     Ok(page_ids)
-}
-
-fn inherited_attr(
-    source: &impl ObjectSource,
-    page_id: ObjectId,
-    key: &[u8],
-) -> Result<Option<Object>> {
-    let mut current = page_id;
-    let mut visited = BTreeSet::new();
-
-    loop {
-        if !visited.insert(current) {
-            return Err(PdfOpsError::InvalidStructure(
-                "cycle detected while resolving inherited page attributes".into(),
-            ));
-        }
-
-        let object = match source.get_object_value(current) {
-            Ok(object) => object,
-            Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
-            Err(err) => return Err(PdfOpsError::Pdf(err)),
-        };
-        let dict = object.as_dict().map_err(|_| {
-            PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
-        })?;
-        if let Ok(value) = dict.get(key) {
-            return Ok(Some(value.clone()));
-        }
-        match dict.get(b"Parent") {
-            Ok(Object::Reference(parent)) => current = *parent,
-            Ok(_) => {
-                return Err(PdfOpsError::InvalidStructure(
-                    "page tree parent is not a reference".into(),
-                ));
-            }
-            Err(_) => return Ok(None),
-        }
-    }
 }
 
 #[cfg(test)]
