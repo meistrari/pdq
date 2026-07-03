@@ -110,7 +110,9 @@ jobs:
         id: check
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          if curl -sf "https://crates.io/api/v1/crates/pdq/$VERSION" > /dev/null; then
+          # crates.io rejects curl's default User-Agent with a 403
+          if curl -sf -A "pdq-release-workflow (github.com/meistrari/pdq)" \
+              "https://crates.io/api/v1/crates/pdq/$VERSION" > /dev/null; then
             echo "Version $VERSION already published; skipping." >&2
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
