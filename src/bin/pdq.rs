@@ -2,7 +2,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
-    merge_with_options, split, split_pages, MergeInput, MergeOptions, PageRangeGroup, SplitOutput,
+    merge_with_options, page_count, split, split_pages, MergeInput, MergeOptions, PageRangeGroup,
+    SplitOutput,
 };
 
 #[derive(Debug, Parser)]
@@ -18,6 +19,7 @@ enum Command {
     Split(SplitArgs),
     SplitPages(SplitPagesArgs),
     Merge(MergeArgs),
+    PageCount(PageCountArgs),
 }
 
 #[derive(Debug, Args)]
@@ -43,6 +45,11 @@ struct SplitPagesArgs {
 
     #[arg(short, long, value_name = "PATTERN")]
     output: String,
+}
+
+#[derive(Debug, Args)]
+struct PageCountArgs {
+    input: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -71,6 +78,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     preserve_whole_single_input: true,
                 },
             )?;
+        }
+        Command::PageCount(args) => {
+            let count = page_count(&args.input)?;
+            println!("{count}");
         }
     }
     Ok(())

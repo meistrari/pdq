@@ -6,8 +6,8 @@ use std::{
 
 use lopdf::{dictionary, Dictionary, Document, Object, Stream};
 use pdq::{
-    merge, merge_with_options, split, split_pages, MergeInput, MergeOptions, PageRangeGroup,
-    PdfOpsError, SplitOutput,
+    merge, merge_with_options, page_count, split, split_pages, MergeInput, MergeOptions,
+    PageRangeGroup, PdfOpsError, SplitOutput,
 };
 use tempfile::tempdir;
 
@@ -136,6 +136,34 @@ fn split_writes_outputs_and_qpdf_validates_page_counts() {
     let qpdf = QpdfValidator::detect();
     qpdf.validate(&first, 3);
     qpdf.validate(&rest, 8);
+}
+
+#[test]
+fn page_count_cli_reports_total_pages() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pdq"))
+        .arg("page-count")
+        .arg(fixture("11-pages.pdf"))
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run pdq page-count: {err}"));
+    assert!(
+        output.status.success(),
+        "pdq page-count failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reported = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .expect("page-count should print an integer");
+    assert_eq!(reported, 11);
+}
+
+#[test]
+fn page_count_library_matches_object_stream_input() {
+    // Object-stream (compressed xref) input exercises the lazy reader's
+    // compressed-object path, mirroring the split-pages fixtures.
+    assert_eq!(page_count(&fixture("11-pages-objstm.pdf")).unwrap(), 11);
 }
 
 #[test]

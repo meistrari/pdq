@@ -1,4 +1,5 @@
 pub mod copy;
+pub mod count;
 pub mod lazy;
 pub mod load;
 pub mod merge;
@@ -8,6 +9,7 @@ pub mod split;
 mod write;
 
 pub use copy::{CopyContext, CopyOptions};
+pub use count::page_count;
 pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
 pub use range::{PageRangeError, PageRangeGroup};
 pub use split::{split, split_pages, SplitOutput};
