@@ -1,6 +1,5 @@
 use std::{
     fs::{self, OpenOptions},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process,
 };
@@ -163,7 +162,10 @@ fn copy_whole_input(input: &MergeInput, output: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn same_file(left: &Path, right: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
     let left = fs::metadata(left)?;
     let right = match fs::metadata(right) {
         Ok(metadata) => metadata,
@@ -171,6 +173,20 @@ fn same_file(left: &Path, right: &Path) -> Result<bool> {
         Err(err) => return Err(err.into()),
     };
     Ok(left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+// Windows has no stable dev/ino equivalent. Canonical paths cover self and
+// symlink cases; hard links to the same file slip through, where fs::copy
+// then fails with a sharing violation instead of corrupting the input.
+#[cfg(not(unix))]
+fn same_file(left: &Path, right: &Path) -> Result<bool> {
+    let left = fs::canonicalize(left)?;
+    let right = match fs::canonicalize(right) {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(left == right)
 }
 
 fn resolve_merge_page_ids(
