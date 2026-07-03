@@ -2,7 +2,7 @@
 name = "pdq"
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.92"
 license = "Artistic-2.0"
 description = "PDF operations library"
 repository = "https://github.com/meistrari/pdq"
@@ -10,8 +10,13 @@ readme = "README.md"
 keywords = ["pdf", "split", "merge", "cli"]
 categories = ["command-line-utilities"]
 
+[features]
+default = ["render"]
+render = ["dep:hayro"]
+
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
+hayro = { version = "0.7.1", features = ["embed-fonts"], optional = true }
 lopdf = "0.43.0"
 memmap2 = "0.9.9"
 rayon = "1.12.0"

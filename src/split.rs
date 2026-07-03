@@ -102,12 +102,16 @@ fn reject_duplicate_output_paths(outputs: &[ResolvedSplitOutput]) -> Result<()> 
     Ok(())
 }
 
-fn render_output_pattern(pattern: &str, page_number: usize, width: usize) -> Result<PathBuf> {
+pub(crate) fn render_output_pattern(
+    pattern: &str,
+    page_number: usize,
+    width: usize,
+) -> Result<PathBuf> {
     let page = format!("{page_number:0width$}");
     Ok(PathBuf::from(pattern.replacen("%d", &page, 1)))
 }
 
-fn validate_output_pattern(pattern: &str) -> Result<()> {
+pub(crate) fn validate_output_pattern(pattern: &str) -> Result<()> {
     let occurrences = pattern.match_indices("%d").count();
     if occurrences != 1 {
         return Err(PdfOpsError::InvalidStructure(

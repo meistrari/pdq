@@ -30,6 +30,15 @@ of `qpdf --show-npages`).
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.
 
+## Render
+
+`pdq render` rasterizes pages to PNG through [hayro](https://github.com/LaurenzV/hayro),
+a pure-Rust PDF renderer, so the qpdf-free and FFI-free constraints still hold.
+Pages render in parallel and `%d` in the output pattern receives the original,
+zero-padded page number. The command lives behind the `render` cargo feature,
+which is enabled by default; build with `--no-default-features` for a smaller
+split/merge-only binary. Rendering requires Rust 1.92 or newer.
+
 ## Benchmark Snapshot
 
 Measured on 2026-07-03 with local PDFs identified only by page count. Wall time
