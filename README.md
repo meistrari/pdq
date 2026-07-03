@@ -21,7 +21,11 @@ cargo test
 cargo run --bin pdq -- split input.pdf --out 1-3 out-1.pdf --out 4-z out-2.pdf
 cargo run --bin pdq -- split-pages --output 'page-%d.pdf' input.pdf
 cargo run --bin pdq -- merge --output merged.pdf a.pdf b.pdf
+cargo run --bin pdq -- page-count input.pdf
 ```
+
+`page-count` prints the number of pages to stdout (the `lopdf`-native equivalent
+of `qpdf --show-npages`).
 
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.
