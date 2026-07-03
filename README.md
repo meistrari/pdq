@@ -28,20 +28,27 @@ The runtime implementation must remain qpdf-free.
 
 ## Benchmark Snapshot
 
-Measured on 2026-07-03 with local PDFs identified only by page count. Each row
-is a single run using `/usr/bin/time -l`; RSS is maximum resident set size.
-Completed outputs were validated by page count and `qpdf --warning-exit-0
---check`. Split scenarios validated the first and last output file.
+Measured on 2026-07-03 with local PDFs identified only by page count. Wall time
+is `hyperfine --warmup 1 --runs 5` mean plus standard deviation. RSS is maximum
+resident set size from a separate single `/usr/bin/time -l` run, so use it as a
+memory-order signal rather than a statistically averaged value.
 
-For rewrite and merge scenarios, qpdf used `--remove-unreferenced-resources=no`
-to measure the comparable fast copy path. The market runner-up is the fastest
-comparable non-qpdf CLI measured locally: Poppler for split workloads, MuPDF for
-rewrite and merge workloads.
+Completed outputs were validated by page count and `qpdf --warning-exit-0
+--check`. Split scenarios validated the first and last output file. qpdf used
+`--remove-unreferenced-resources=no` for copy-like paths where applicable.
 
 | Scenario | pdq | qpdf | Market runner-up | Notes |
 | --- | ---: | ---: | ---: | --- |
-| 12,732-page split into single-page PDFs | 2.04s / 245 MB | 2.96s / 1.45 GB | Poppler >60s timeout | Poppler produced 3 partial outputs before timeout. |
-| 2,642-page split into single-page PDFs | 0.64s / 146 MB | 3.63s / 907 MB | Poppler >60s timeout | Poppler produced 58 partial outputs before timeout. |
-| 12,732-page full rewrite | 0.99s / 1.03 GB | 1.53s / 417 MB | MuPDF 6.30s / 80 MB | pdq wins wall time; qpdf and MuPDF use less memory. |
-| 2,642-page full rewrite | 1.16s / 254 MB | 0.21s / 98 MB | MuPDF 0.36s / 26 MB | qpdf wins this small rewrite path. |
-| 15,374-page merge | 2.02s / 713 MB | 1.30s / 501 MB | MuPDF 9.06s / 384 MB | qpdf still wins merge wall time and RSS. |
+| 12,732-page split into single-page PDFs | 1.75s +/- 0.05s / 241 MB | 4.27s +/- 0.07s / 217 MB | Poppler >60s timeout | Poppler produced 3 partial outputs before timeout. |
+| 2,642-page split into single-page PDFs | 0.55s +/- 0.03s / 146 MB | >60s timeout | Poppler >60s timeout | qpdf produced 727 partial outputs; Poppler produced 59. |
+| 12,732-page full rewrite | 0.56s +/- 0.04s / 1.03 GB | 0.91s +/- 0.03s / 221 MB | MuPDF 0.54s +/- 0.02s / 71 MB | MuPDF narrowly wins wall time; pdq is close but uses more memory. |
+| 2,642-page full rewrite | 1.07s +/- 0.01s / 261 MB | 0.17s +/- 0.00s / 57 MB | MuPDF 0.11s +/- 0.00s / 24 MB | Small rewrite remains a qpdf/MuPDF win. |
+| 15,374-page merge | 0.71s +/- 0.01s / 230 MB | 1.36s +/- 0.04s / 495 MB | MuPDF 8.64s +/- 0.22s / 390 MB | pdq uses streaming output for whole-document merge. |
+
+To reproduce the timing matrix:
+
+```sh
+PDQ_BIG_PDF=/path/to/12732-pages.pdf \
+PDQ_SMALL_PDF=/path/to/2642-pages.pdf \
+scripts/benchmark.sh
+```

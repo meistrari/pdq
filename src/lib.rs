@@ -5,6 +5,7 @@ pub mod merge;
 pub mod range;
 mod scan;
 pub mod split;
+mod write;
 
 pub use copy::{CopyContext, CopyOptions};
 pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};

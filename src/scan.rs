@@ -72,13 +72,20 @@ pub(crate) fn collect_used_names(
         dictionary_cache,
         used_names_cache,
     };
-    collect_used_names_from_bytes_with_options(source, None, &content, resources, &mut state, false)
+    collect_used_names_from_bytes_with_options(
+        source,
+        content.stream_id,
+        || Some(content.data),
+        resources,
+        &mut state,
+        false,
+    )
 }
 
 pub(crate) fn collect_used_names_from_stream(
     source: &impl ObjectSource,
     stream_id: Option<ObjectId>,
-    content: &[u8],
+    content: impl FnOnce() -> Option<Vec<u8>>,
     resources: &Dictionary,
     dictionary_cache: &mut BTreeMap<ObjectId, Rc<Dictionary>>,
     used_names_cache: &mut BTreeMap<ObjectId, Option<UsedNames>>,
@@ -95,12 +102,12 @@ pub(crate) fn collect_used_names_from_stream(
 fn collect_used_names_from_bytes_with_options(
     source: &impl ObjectSource,
     stream_id: Option<ObjectId>,
-    content: &[u8],
+    content: impl FnOnce() -> Option<Vec<u8>>,
     resources: &Dictionary,
     state: &mut ScanState<'_>,
     strict_own_form_failures: bool,
 ) -> Result<Option<UsedNames>> {
-    let Some(mut used) = scan_names_cached(content, stream_id, state.used_names_cache) else {
+    let Some(mut used) = scan_names_cached(stream_id, state.used_names_cache, content) else {
         return Ok(None);
     };
     if !all_named_resources_resolve(source, resources, b"Font", &used.fonts, state)? {
@@ -159,13 +166,9 @@ fn collect_form_names(
             }
         }
 
-        let Ok(content) = stream.decompressed_content() else {
-            if strict_own_form_failures {
-                return Ok(false);
-            }
-            continue;
-        };
-        let Some(form_used) = scan_names_cached(&content, id, state.used_names_cache) else {
+        let Some(form_used) = scan_names_cached(id, state.used_names_cache, || {
+            stream.decompressed_content().ok()
+        }) else {
             if strict_own_form_failures {
                 return Ok(false);
             }
@@ -222,18 +225,18 @@ fn collect_form_names(
 fn scan_names(data: &[u8]) -> Option<UsedNames> {
     let content = Content::decode_strict(data).ok()?;
     let mut used = UsedNames::default();
-    let mut last_name: Option<Vec<u8>> = None;
+    let mut last_name: Option<&[u8]> = None;
 
-    for operation in content.operations {
+    for operation in &content.operations {
         for operand in &operation.operands {
             if let Object::Name(name) = operand {
-                last_name = Some(name.clone());
+                last_name = Some(name);
             }
         }
         let Some(resource_type) = resource_type_for_operator(&operation.operator) else {
             continue;
         };
-        let Some(name) = last_name.as_deref() else {
+        let Some(name) = last_name else {
             continue;
         };
         used.insert(resource_type, name);
@@ -243,17 +246,18 @@ fn scan_names(data: &[u8]) -> Option<UsedNames> {
 }
 
 fn scan_names_cached(
-    data: &[u8],
     stream_id: Option<ObjectId>,
     used_names_cache: &mut BTreeMap<ObjectId, Option<UsedNames>>,
+    content: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<UsedNames> {
     let Some(stream_id) = stream_id else {
-        return scan_names(data);
+        return scan_names(&content()?);
     };
     if let Some(cached) = used_names_cache.get(&stream_id) {
         return cached.clone();
     }
-    let used = scan_names(data);
+    let data = content()?;
+    let used = scan_names(&data);
     used_names_cache.insert(stream_id, used.clone());
     used
 }
@@ -271,18 +275,25 @@ fn resource_type_for_operator(operator: &str) -> Option<ResourceType> {
     }
 }
 
-fn content_bytes(source: &impl ObjectSource, page: &Dictionary) -> Result<Option<Vec<u8>>> {
+struct ContentBytes {
+    stream_id: Option<ObjectId>,
+    data: Vec<u8>,
+}
+
+fn content_bytes(source: &impl ObjectSource, page: &Dictionary) -> Result<Option<ContentBytes>> {
     let Ok(contents) = page.get(b"Contents") else {
-        return Ok(Some(Vec::new()));
+        return Ok(Some(ContentBytes {
+            stream_id: None,
+            data: Vec::new(),
+        }));
     };
-    let mut data = Vec::new();
     match contents {
-        Object::Reference(id) => {
-            if append_content_stream(source, *id, &mut data)?.is_none() {
-                return Ok(None);
-            }
-        }
+        Object::Reference(id) => Ok(content_stream_bytes(source, *id)?.map(|data| ContentBytes {
+            stream_id: Some(*id),
+            data,
+        })),
         Object::Array(items) => {
+            let mut data = Vec::new();
             for item in items {
                 let Object::Reference(id) = item else {
                     return Ok(None);
@@ -292,16 +303,22 @@ fn content_bytes(source: &impl ObjectSource, page: &Dictionary) -> Result<Option
                 }
                 data.push(b'\n');
             }
+            Ok(Some(ContentBytes {
+                stream_id: None,
+                data,
+            }))
         }
         Object::Stream(stream) => {
             let Ok(decoded) = stream.decompressed_content() else {
                 return Ok(None);
             };
-            data.extend(decoded);
+            Ok(Some(ContentBytes {
+                stream_id: None,
+                data: decoded,
+            }))
         }
-        _ => return Ok(None),
+        _ => Ok(None),
     }
-    Ok(Some(data))
 }
 
 fn append_content_stream(
@@ -309,6 +326,14 @@ fn append_content_stream(
     id: ObjectId,
     data: &mut Vec<u8>,
 ) -> Result<Option<()>> {
+    let Some(decoded) = content_stream_bytes(source, id)? else {
+        return Ok(None);
+    };
+    data.extend(decoded);
+    Ok(Some(()))
+}
+
+fn content_stream_bytes(source: &impl ObjectSource, id: ObjectId) -> Result<Option<Vec<u8>>> {
     let object = match source.get_object_value(id) {
         Ok(object) => object,
         Err(lopdf::Error::ObjectNotFound(_)) => return Ok(None),
@@ -320,8 +345,7 @@ fn append_content_stream(
     let Ok(decoded) = stream.decompressed_content() else {
         return Ok(None);
     };
-    data.extend(decoded);
-    Ok(Some(()))
+    Ok(Some(decoded))
 }
 
 fn named_resource_object(
