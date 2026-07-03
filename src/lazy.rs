@@ -43,6 +43,26 @@ impl<'a> LazyPdf<'a> {
     }
 
     pub(crate) fn page_ids(&self) -> Result<Vec<ObjectId>> {
+        let mut page_ids = Vec::new();
+        self.walk_pages(|id| page_ids.push(id))?;
+        Ok(page_ids)
+    }
+
+    /// Count leaf `/Page` objects without materializing their ids — an O(1)-memory
+    /// walk sharing `walk_pages` with `page_ids`, so a count can never disagree
+    /// with the pages `split`/`split-pages` would actually resolve.
+    pub(crate) fn count_pages(&self) -> Result<usize> {
+        let mut count = 0usize;
+        self.walk_pages(|_| count += 1)?;
+        Ok(count)
+    }
+
+    /// Walk the page tree in document order, invoking `on_page` for each leaf
+    /// `/Page` object. The single source of truth for "which objects are pages",
+    /// shared by `page_ids` (collect) and `count_pages` (count). Guards against
+    /// malformed/adversarial trees via cycle detection, a depth cap, and an
+    /// object-visit cap.
+    fn walk_pages(&self, mut on_page: impl FnMut(ObjectId)) -> Result<()> {
         let root_id = self
             .reader
             .document
@@ -58,7 +78,6 @@ impl<'a> LazyPdf<'a> {
             .and_then(Object::as_reference)
             .map_err(PdfOpsError::Pdf)?;
 
-        let mut page_ids = Vec::new();
         let mut stack = vec![(pages_id, 0usize)];
         let mut visited = BTreeSet::new();
         let max_iters = self
@@ -94,7 +113,7 @@ impl<'a> LazyPdf<'a> {
                 PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
             })?;
             match dict.get_type().map_err(PdfOpsError::Pdf)? {
-                b"Page" => page_ids.push(id),
+                b"Page" => on_page(id),
                 b"Pages" => {
                     let kids = dict
                         .get(b"Kids")
@@ -110,7 +129,7 @@ impl<'a> LazyPdf<'a> {
             }
         }
 
-        Ok(page_ids)
+        Ok(())
     }
 
     fn get_owned(&self, id: ObjectId) -> Result<Object> {
