@@ -63,7 +63,7 @@ impl StreamingPdfWriter {
             PdfOpsError::InvalidStructure("streaming output offset exceeds PDF xref limit".into())
         })?;
         self.offsets.insert(id.0, offset);
-        write!(self.output, "{} {} obj\n", id.0, id.1)?;
+        writeln!(self.output, "{} {} obj", id.0, id.1)?;
         write_object(&mut self.output, object)?;
         self.output.write_all(b"\nendobj\n")?;
         Ok(())
