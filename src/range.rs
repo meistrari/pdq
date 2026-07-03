@@ -177,7 +177,9 @@ pub enum PageRangeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{dedupe_preserving_order, PageRangeGroup};
+    use super::{
+        dedupe_preserving_order, parse_group_string, parse_groups, PageRangeError, PageRangeGroup,
+    };
 
     #[test]
     fn resolves_forward_ranges_and_lists() {
@@ -213,5 +215,79 @@ mod tests {
     #[test]
     fn dedupes_without_sorting() {
         assert_eq!(dedupe_preserving_order(&[3, 1, 3, 2, 1]), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn resolves_descending_ranges_in_reverse_order() {
+        let group = PageRangeGroup::parse("5-2").unwrap();
+
+        assert_eq!(group.resolve(6).unwrap(), vec![5, 4, 3, 2]);
+    }
+
+    #[test]
+    fn trims_whitespace_around_parts_and_endpoints() {
+        let group = PageRangeGroup::parse("  1 - 2 , 4  ").unwrap();
+
+        assert_eq!(group.raw(), "1 - 2 , 4");
+        assert_eq!(group.resolve(4).unwrap(), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn rejects_page_zero() {
+        assert!(matches!(
+            PageRangeGroup::parse("0"),
+            Err(PageRangeError::ZeroPage)
+        ));
+        assert!(matches!(
+            PageRangeGroup::parse("r0"),
+            Err(PageRangeError::ZeroPage)
+        ));
+    }
+
+    #[test]
+    fn rejects_trailing_comma_as_empty_range() {
+        assert!(matches!(
+            PageRangeGroup::parse("1,"),
+            Err(PageRangeError::EmptyRange)
+        ));
+    }
+
+    #[test]
+    fn rejects_reverse_endpoint_beyond_page_count() {
+        let group = PageRangeGroup::parse("r5").unwrap();
+
+        assert!(matches!(
+            group.resolve(3),
+            Err(PageRangeError::OutOfBounds {
+                page: 5,
+                page_count: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn resolve_rejects_empty_documents() {
+        let group = PageRangeGroup::parse("1").unwrap();
+
+        assert!(matches!(group.resolve(0), Err(PageRangeError::NoPages)));
+    }
+
+    #[test]
+    fn parse_groups_rejects_empty_list_and_keeps_order() {
+        assert!(matches!(parse_groups(&[]), Err(PageRangeError::EmptyGroup)));
+
+        let groups = parse_groups(&["1-2".to_string(), "3".to_string()]).unwrap();
+        assert_eq!(groups[0].raw(), "1-2");
+        assert_eq!(groups[1].raw(), "3");
+    }
+
+    #[test]
+    fn parse_group_string_splits_on_semicolons() {
+        let groups = parse_group_string("1-2;r1").unwrap();
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].raw(), "1-2");
+        assert_eq!(groups[1].raw(), "r1");
+        assert!(parse_group_string("1-2;;3").is_err());
     }
 }
