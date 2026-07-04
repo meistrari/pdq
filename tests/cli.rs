@@ -208,6 +208,43 @@ fn split_pages_cli_rejects_pattern_with_multiple_placeholders() {
 }
 
 #[test]
+fn page_count_cli_strict_flag_reports_total_pages() {
+    for input in ["11-pages.pdf", "11-pages-objstm.pdf"] {
+        pdq()
+            .arg("page-count")
+            .arg("--strict")
+            .arg(fixture(input))
+            .assert()
+            .success()
+            .stdout(predicate::str::diff("11\n"));
+        // Default (trusted /Count) mode must agree with --strict.
+        pdq()
+            .arg("page-count")
+            .arg(fixture(input))
+            .assert()
+            .success()
+            .stdout(predicate::str::diff("11\n"));
+    }
+}
+
+#[test]
+fn page_count_cli_rejects_encrypted_input_in_both_modes() {
+    for encrypted in ["user-password.pdf", "owner-only.pdf"] {
+        for strict in [false, true] {
+            let mut cmd = pdq();
+            cmd.arg("page-count");
+            if strict {
+                cmd.arg("--strict");
+            }
+            cmd.arg(fixture(encrypted))
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("unsupported"));
+        }
+    }
+}
+
+#[test]
 fn cli_without_subcommand_prints_usage() {
     pdq()
         .assert()

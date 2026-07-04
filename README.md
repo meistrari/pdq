@@ -24,8 +24,12 @@ cargo run --bin pdq -- merge --output merged.pdf a.pdf b.pdf
 cargo run --bin pdq -- page-count input.pdf
 ```
 
-`page-count` prints the number of pages to stdout (the `lopdf`-native equivalent
-of `qpdf --show-npages`).
+`page-count` prints the number of pages to stdout. By default it trusts the
+root `/Pages` `/Count` — the same semantics as `qpdf --show-npages` — and
+automatically falls back to a validated page-tree walk when `/Count` is
+missing, malformed, negative, or implausibly large. Pass `--strict` to force
+the validated walk, which counts the exact leaf pages `split`/`split-pages`
+would resolve and is immune to lying metadata.
 
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.

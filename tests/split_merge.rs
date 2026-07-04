@@ -6,8 +6,8 @@ use std::{
 
 use lopdf::{dictionary, Dictionary, Document, Object, Stream};
 use pdq::{
-    merge, merge_with_options, page_count, split, split_pages, MergeInput, MergeOptions,
-    PageRangeGroup, PdfOpsError, SplitOutput,
+    merge, merge_with_options, page_count, page_count_fast, split, split_pages, MergeInput,
+    MergeOptions, PageRangeGroup, PdfOpsError, SplitOutput,
 };
 use tempfile::tempdir;
 
@@ -164,6 +164,76 @@ fn page_count_library_matches_object_stream_input() {
     // Object-stream (compressed xref) input exercises the lazy reader's
     // compressed-object path, mirroring the split-pages fixtures.
     assert_eq!(page_count(&fixture("11-pages-objstm.pdf")).unwrap(), 11);
+}
+
+#[test]
+fn page_count_fast_matches_strict_on_fixtures() {
+    for name in ["11-pages.pdf", "11-pages-objstm.pdf"] {
+        let path = fixture(name);
+        let strict = page_count(&path)
+            .unwrap_or_else(|err| panic!("strict page_count failed for {name}: {err}"));
+        let fast = page_count_fast(&path)
+            .unwrap_or_else(|err| panic!("page_count_fast failed for {name}: {err}"));
+        assert_eq!(fast, strict, "fast and strict counts diverge for {name}");
+        assert_eq!(fast, 11, "unexpected page count for {name}");
+    }
+}
+
+#[test]
+fn page_count_fast_falls_back_when_count_is_missing_or_malformed() {
+    let temp = tempdir().unwrap();
+    let cases: [(&str, Option<Object>); 4] = [
+        ("missing", None),
+        ("wrong-type", Some(Object::Name(b"three".to_vec()))),
+        ("negative", Some(Object::Integer(-3))),
+        // Far larger than the xref size (the fixture has ~6 objects): a page
+        // needs at least one object, so this /Count is provably a lie.
+        ("implausible", Some(Object::Integer(1_000_000))),
+    ];
+    for (label, count) in cases {
+        let input = temp.path().join(format!("count-{label}.pdf"));
+        write_three_page_pdf_with_count(&input, count);
+        assert_eq!(
+            page_count_fast(&input).unwrap(),
+            3,
+            "fast path must fall back to the walk for {label} /Count"
+        );
+        assert_eq!(
+            page_count(&input).unwrap(),
+            3,
+            "strict walk must count real pages for {label} /Count"
+        );
+    }
+}
+
+#[test]
+fn page_count_fast_trusts_plausible_count_by_design() {
+    // Documented market semantics (same as `qpdf --show-npages`): a lying but
+    // plausible /Count is trusted by the fast path and only caught by --strict.
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("count-lying-plausible.pdf");
+    write_three_page_pdf_with_count(&input, Some(Object::Integer(2)));
+
+    assert_eq!(page_count_fast(&input).unwrap(), 2);
+    assert_eq!(page_count(&input).unwrap(), 3);
+}
+
+#[test]
+fn page_count_rejects_encrypted_inputs_in_both_modes() {
+    for name in ["user-password.pdf", "owner-only.pdf"] {
+        let path = fixture(name);
+        assert!(
+            matches!(page_count(&path).unwrap_err(), PdfOpsError::Unsupported(_)),
+            "strict page_count must reject {name}"
+        );
+        assert!(
+            matches!(
+                page_count_fast(&path).unwrap_err(),
+                PdfOpsError::Unsupported(_)
+            ),
+            "page_count_fast must reject {name}"
+        );
+    }
 }
 
 #[test]
@@ -570,6 +640,48 @@ fn split_rejects_duplicate_output_paths_before_writing() {
 
     assert!(matches!(error, PdfOpsError::InvalidStructure(_)));
     assert!(!duplicate.exists());
+}
+
+/// Three real leaf pages; the root /Pages carries `count` verbatim as /Count
+/// (or omits the key entirely) so tests can probe the trusted-count fast path.
+fn write_three_page_pdf_with_count(path: &Path, count: Option<Object>) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let page_ids: Vec<_> = (0..3).map(|_| document.new_object_id()).collect();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+    let mut pages_dict = dictionary! {
+        "Type" => "Pages",
+        "Kids" => Object::Array(page_ids.iter().copied().map(Object::Reference).collect()),
+    };
+    if let Some(count) = count {
+        pages_dict.set("Count", count);
+    }
+    document.objects.insert(pages_id, pages_dict.into());
+    for page_id in page_ids {
+        document.objects.insert(
+            page_id,
+            dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+                "Resources" => dictionary! {},
+            }
+            .into(),
+        );
+    }
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save page-count fixture: {err}"));
 }
 
 fn write_one_page_pdf_with_dangling_reference(path: &Path) {

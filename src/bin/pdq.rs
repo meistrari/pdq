@@ -2,8 +2,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
-    merge_with_options, page_count, split, split_pages, MergeInput, MergeOptions, PageRangeGroup,
-    SplitOutput,
+    merge_with_options, page_count, page_count_fast, split, split_pages, MergeInput, MergeOptions,
+    PageRangeGroup, SplitOutput,
 };
 
 #[derive(Debug, Parser)]
@@ -19,6 +19,7 @@ enum Command {
     Split(SplitArgs),
     SplitPages(SplitPagesArgs),
     Merge(MergeArgs),
+    /// Print the number of pages (trusts the root /Count like qpdf; --strict walks the page tree)
     PageCount(PageCountArgs),
 }
 
@@ -50,6 +51,12 @@ struct SplitPagesArgs {
 #[derive(Debug, Args)]
 struct PageCountArgs {
     input: PathBuf,
+
+    /// Validate the count by walking every page-tree node instead of trusting
+    /// the root /Count (slower, but immune to lying metadata; a missing or
+    /// implausible /Count already falls back to this walk automatically)
+    #[arg(long)]
+    strict: bool,
 }
 
 fn main() -> ExitCode {
@@ -80,7 +87,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         Command::PageCount(args) => {
-            let count = page_count(&args.input)?;
+            let count = if args.strict {
+                page_count(&args.input)?
+            } else {
+                page_count_fast(&args.input)?
+            };
             println!("{count}");
         }
     }

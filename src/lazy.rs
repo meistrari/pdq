@@ -67,6 +67,44 @@ impl<'a> LazyPdf<'a> {
         Ok(count)
     }
 
+    /// Trusted-count fast path with `qpdf --show-npages` semantics: return the
+    /// root `/Pages` node's `/Count` without walking the tree, so a
+    /// lying-but-plausible `/Count` IS trusted. Any anomaly — missing `/Count`,
+    /// not a direct non-negative integer, or a value larger than the xref size
+    /// (every page needs at least one xref entry, so a bigger count is provably
+    /// a lie) — falls back to the validated walk (`count_pages`).
+    pub(crate) fn count_pages_fast(&self) -> Result<usize> {
+        match self.trusted_root_count() {
+            Some(count) => Ok(count),
+            None => self.count_pages(),
+        }
+    }
+
+    /// Read the root `/Pages` `/Count` if — and only if — it is plausible.
+    fn trusted_root_count(&self) -> Option<usize> {
+        let root_id = self
+            .reader
+            .document
+            .trailer
+            .get(b"Root")
+            .ok()?
+            .as_reference()
+            .ok()?;
+        let root = self.get_object_value(root_id).ok()?;
+        let pages_id = root
+            .as_dict()
+            .ok()?
+            .get(b"Pages")
+            .ok()?
+            .as_reference()
+            .ok()?;
+        let pages = self.get_object_value(pages_id).ok()?;
+        let count = pages.as_dict().ok()?.get(b"Count").ok()?.as_i64().ok()?;
+        // `usize::try_from` rejects negative counts.
+        let count = usize::try_from(count).ok()?;
+        (count <= self.reader.document.reference_table.size as usize).then_some(count)
+    }
+
     /// Walk the page tree in document order, invoking `on_page` for each leaf
     /// `/Page` object. The single source of truth for "which objects are pages",
     /// shared by `page_ids` (collect) and `count_pages` (count). Guards against
