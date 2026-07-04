@@ -61,6 +61,32 @@ zero-padded page number. The command lives behind the `render` cargo feature,
 which is enabled by default; build with `--no-default-features` for a smaller
 split/merge-only binary. Rendering requires Rust 1.92 or newer.
 
+## Real-Document Testing
+
+`tests/real_world.rs` builds raw-byte replicas of the two court-document
+families from the benchmark corpus (deep balanced page tree with an image
+filter zoo; flat page tree with one shared resources dictionary) and asserts
+split/merge behavior on them, including resource-pruning regression guards.
+
+`tests/corpus.rs` runs pdq against a directory of actual PDFs with qpdf as
+ground truth, classifying each file (pass / note / skip / warn / fail):
+
+```sh
+scripts/fetch_corpus.sh --fixtures --qpdf --pdfjs   # reproducible anywhere
+scripts/fetch_corpus.sh --local ~/Downloads          # plus your own PDFs
+cargo test --release --test corpus -- --ignored --nocapture
+```
+
+No PDFs are versioned: `--qpdf`/`--pdfjs` fetch the public test corpora from
+their upstream repositories, and `--fixtures` regenerates the anonymized
+benchmark replicas (12,732 and 2,642 pages) from the seeded generator in
+`scripts/make_fixtures.py` — private documents stay strictly local.
+
+The corpus lives in `corpus/` (gitignored; local files are symlinked). Use
+`PDQ_CORPUS_DIR` to point elsewhere, `PDQ_CORPUS_MAX_FILES` to cap a run, and
+`PDQ_CORPUS_STRICT=1` to also fail on scope gaps where qpdf handles a file
+that pdq refuses.
+
 ## Benchmarks
 
 ![pdq benchmarks — real-world PDFs vs qpdf, MuPDF and Poppler](assets/benchmark.svg)

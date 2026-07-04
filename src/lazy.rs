@@ -434,11 +434,25 @@ fn classify_page_dict(object: &Object) -> Result<PageNode> {
                 .get(b"Kids")
                 .and_then(Object::as_array)
                 .map_err(PdfOpsError::Pdf)?;
-            Ok(PageNode::Interior(
-                kids.iter()
-                    .filter_map(|kid| kid.as_reference().ok())
-                    .collect(),
-            ))
+            let mut kid_ids = Vec::with_capacity(kids.len());
+            for kid in kids {
+                match kid {
+                    Object::Reference(kid_id) => kid_ids.push(*kid_id),
+                    // A direct page dict has no object id, so split could
+                    // never copy it; refuse loudly instead of silently
+                    // under-counting (qpdf-qtest 0213).
+                    Object::Dictionary(_) => {
+                        return Err(PdfOpsError::InvalidStructure(
+                            "page tree kid is a direct object; pages must be \
+                             indirect references"
+                                .into(),
+                        ));
+                    }
+                    // tolerate nulls and other junk in Kids arrays
+                    _ => {}
+                }
+            }
+            Ok(PageNode::Interior(kid_ids))
         }
         _ => Ok(PageNode::Other),
     }
