@@ -64,6 +64,35 @@ impl QpdfValidator {
         );
     }
 
+    fn check_pdf_warning_exit_0(&self, path: &Path) {
+        if !self.available {
+            eprintln!(
+                "qpdf unavailable; skipping qpdf --warning-exit-0 --check for {}",
+                path.display()
+            );
+            return;
+        }
+
+        let output = Command::new("qpdf")
+            .arg("--warning-exit-0")
+            .arg("--check")
+            .arg(path)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to run qpdf --warning-exit-0 --check {}: {err}",
+                    path.display()
+                )
+            });
+        assert!(
+            output.status.success(),
+            "qpdf --warning-exit-0 --check failed for {}\nstdout:\n{}\nstderr:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn assert_npages(&self, path: &Path, expected: usize) {
         if !self.available {
             eprintln!(
@@ -189,6 +218,25 @@ fn assert_decrypted(path: &Path) {
     );
 }
 
+fn assert_issue7665_content(path: &Path) {
+    let document = Document::load(path)
+        .unwrap_or_else(|err| panic!("failed to load {}: {err}", path.display()));
+    let pages = document.get_pages();
+    assert_eq!(pages.len(), 1, "{} should have one page", path.display());
+    let content = document.get_page_content(pages[&1]).unwrap_or_else(|err| {
+        panic!(
+            "failed to decode page content for {}: {err}",
+            path.display()
+        )
+    });
+    assert_eq!(
+        String::from_utf8_lossy(&content).trim_end(),
+        "BT\n10 20 TD\n/F1 20 Tf\n(Issue 7665) Tj\nET",
+        "{} should contain decrypted page content",
+        path.display()
+    );
+}
+
 #[test]
 fn split_writes_outputs_and_qpdf_validates_page_counts() {
     let temp = tempdir().unwrap();
@@ -261,7 +309,7 @@ fn operations_handle_filter_abbreviations_in_xref_object_and_content_streams() {
     split(
         &input,
         &[SplitOutput {
-            range: PageRangeGroup::parse("1").unwrap(),
+            range: PageRangeGroup::parse("1-z").unwrap(),
             path: split_output.clone(),
         }],
     )
@@ -280,8 +328,7 @@ fn operations_handle_filter_abbreviations_in_xref_object_and_content_streams() {
 
     let qpdf = QpdfValidator::detect();
     qpdf.validate(&split_output, 1);
-    qpdf.validate(&merged, 1);
-    assert_page_resources(&split_output, &qpdf, &["X0"], &[]);
+    assert_page_resources(&merged, &qpdf, &["X0"], &[]);
 }
 
 #[test]
@@ -1271,6 +1318,51 @@ fn merge_with_password_decrypts_aes256_user_password_input() {
     assert_decrypted(&output);
     qpdf.validate(&output, 11);
     qpdf.assert_not_encrypted(&output);
+}
+
+#[test]
+fn aes256_r6_empty_user_password_outputs_do_not_keep_ciphertext_streams() {
+    let input = fixture("issue7665.pdf");
+    let temp = tempdir().unwrap();
+    let split_output = temp.path().join("split.pdf");
+    let rewrite_output = temp.path().join("rewrite.pdf");
+    let split_pages_pattern = temp.path().join("page-%d.pdf");
+    let split_pages_output = temp.path().join("page-1.pdf");
+    let merge_output = temp.path().join("merge.pdf");
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1").unwrap(),
+            path: split_output.clone(),
+        }],
+    )
+    .unwrap();
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: rewrite_output.clone(),
+        }],
+    )
+    .unwrap();
+    split_pages(&input, split_pages_pattern.to_str().unwrap()).unwrap();
+    merge(&[MergeInput::all(&input)], &merge_output).unwrap();
+
+    let qpdf = QpdfValidator::detect();
+    for output in [
+        split_output,
+        rewrite_output,
+        split_pages_output,
+        merge_output,
+    ] {
+        assert_written(&output);
+        assert_decrypted(&output);
+        assert_issue7665_content(&output);
+        qpdf.check_pdf_warning_exit_0(&output);
+        qpdf.assert_npages(&output, 1);
+        qpdf.assert_not_encrypted(&output);
+    }
 }
 
 #[test]

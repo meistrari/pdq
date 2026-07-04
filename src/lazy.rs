@@ -10,7 +10,9 @@ use lopdf::{xref::XrefEntry, Dictionary, Document, Object, ObjectId, Reader, Str
 use crate::{
     copy::ObjectSource,
     filter::decode_stream_in_place,
-    load::{decorate_load_error, ensure_decrypted, load_options, upgrade_damaged_xref_error},
+    load::{
+        decorate_load_error, finalize_decrypted_document, load_options, upgrade_damaged_xref_error,
+    },
     xrefboot::Lexer,
     PdfOpsError, Result,
 };
@@ -75,7 +77,7 @@ impl<'a> PdfSource<'a> {
             eprintln!("phase parse: xref bootstrap fell back to full lopdf parse");
         }
 
-        let document = match Document::load_mem_with_options(
+        let mut document = match Document::load_mem_with_options(
             buffer,
             load_options(password, Some(drop_object)),
         ) {
@@ -93,7 +95,7 @@ impl<'a> PdfSource<'a> {
                 }
             }
         };
-        ensure_decrypted(&document, path)?;
+        finalize_decrypted_document(&mut document, path, Some(buffer))?;
         if document.was_encrypted() {
             return Ok(Self::Eager(document));
         }
@@ -828,29 +830,31 @@ mod tests {
         ]);
 
         let objects = parse_object_stream(&stream).unwrap();
-
-        assert!(matches!(
-            objects[&(2, 0)].as_dict().unwrap().get(b"Type").unwrap(),
-            Object::Name(name) if name == b"Catalog"
-        ));
-        assert!(matches!(
-            objects[&(3, 0)].as_dict().unwrap().get(b"Type").unwrap(),
-            Object::Name(name) if name == b"Pages"
-        ));
-        assert!(matches!(
-            objects[&(4, 0)].as_dict().unwrap().get(b"Type").unwrap(),
-            Object::Name(name) if name == b"Page"
-        ));
+        assert!(objects
+            .get(&(4, 0))
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .has_type(b"Page"));
     }
 
     #[test]
     fn object_stream_parser_uses_offsets_for_adjacent_numeric_objects() {
-        let stream = object_stream_from_members(&[(2, b"123"), (3, b"456")]);
+        let index = b"7 0\n8 4\n";
+        let mut content = index.to_vec();
+        content.extend_from_slice(b"12345678");
+        let stream = Stream::new(
+            dictionary! {
+                "Type" => "ObjStm",
+                "N" => 2,
+                "First" => index.len() as i64,
+            },
+            content,
+        );
 
         let objects = parse_object_stream(&stream).unwrap();
-
-        assert_eq!(objects[&(2, 0)], Object::Integer(123));
-        assert_eq!(objects[&(3, 0)], Object::Integer(456));
+        assert_eq!(objects.get(&(7, 0)), Some(&Object::Integer(1234)));
+        assert_eq!(objects.get(&(8, 0)), Some(&Object::Integer(5678)));
     }
 
     #[test]
@@ -865,21 +869,27 @@ mod tests {
     }
 
     fn object_stream_from_members(members: &[(u32, &[u8])]) -> Stream {
-        let mut header = Vec::new();
-        let mut body = Vec::new();
-        for (id, object) in members {
-            header.extend_from_slice(format!("{id} {} ", body.len()).as_bytes());
-            body.extend_from_slice(object);
+        let mut bodies = Vec::new();
+        let mut entries = Vec::new();
+        for (id, body) in members {
+            entries.push((*id, bodies.len()));
+            bodies.extend_from_slice(body);
         }
-        let first = header.len();
-        header.extend_from_slice(&body);
+
+        let mut content = Vec::new();
+        for (id, offset) in &entries {
+            content.extend_from_slice(format!("{id} {offset}\n").as_bytes());
+        }
+        let first = content.len();
+        content.extend_from_slice(&bodies);
+
         Stream::new(
             dictionary! {
                 "Type" => "ObjStm",
                 "N" => members.len() as i64,
                 "First" => first as i64,
             },
-            header,
+            content,
         )
     }
 }

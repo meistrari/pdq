@@ -1125,7 +1125,9 @@ dependencies = [
 name = "pdq"
 version = "0.3.0"
 dependencies = [
+ "aes",
  "assert_cmd",
+ "cbc",
  "clap",
  "dhat",
  "flate2",

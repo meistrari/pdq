@@ -16,6 +16,8 @@ render = ["dep:hayro"]
 dhat-heap = ["dep:dhat"]
 
 [dependencies]
+aes = "0.9.1"
+cbc = "0.2.1"
 clap = { version = "4.6.1", features = ["derive"] }
 dhat = { version = "0.3", optional = true }
 hayro = { version = "0.7.1", features = ["embed-fonts"], optional = true }
