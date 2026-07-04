@@ -8,6 +8,7 @@ use rayon::prelude::*;
 
 use crate::{
     copy::{copy_pages_with_options, resolve_page_ids, CopyOptions, ObjectSource},
+    lazy::inferred_page_leaf,
     load::{load_document, map_file},
     merge::merge_whole_inputs_streaming,
     range::{PageRangeError, PageRangeGroup},
@@ -389,11 +390,12 @@ pub(crate) fn finish_pages(target: &mut Document, pages: &[lopdf::ObjectId]) -> 
             .get_object_mut(*page_id)?
             .as_dict_mut()
             .map_err(|_| PdfOpsError::InvalidStructure("page is not a dictionary".into()))?;
-        if !page.has_type(b"Page") {
+        if !inferred_page_leaf(page) {
             return Err(PdfOpsError::InvalidStructure(
                 "pages tree kid does not have /Type /Page".into(),
             ));
         }
+        page.set("Type", "Page");
         page.set("Parent", pages_id);
     }
     target.objects.insert(
