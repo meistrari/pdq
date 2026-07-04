@@ -46,6 +46,39 @@ pub(crate) fn decorate_load_error(err: lopdf::Error, path: &Path) -> PdfOpsError
     }
 }
 
+/// Load failed AND reconstruction failed: name the real problem — damaged
+/// cross-reference data — instead of lopdf's generic parse error, and point
+/// at dedicated repair tooling (issue #14). Errors outside that class (bad
+/// header, I/O, …) keep their original message.
+pub(crate) fn upgrade_damaged_xref_error(err: lopdf::Error, path: &Path) -> PdfOpsError {
+    let xref_class = match &err {
+        lopdf::Error::Xref(_)
+        | lopdf::Error::ObjectIdMismatch
+        | lopdf::Error::IndirectObject { .. } => true,
+        // `ParseError` is not re-exported by lopdf, so classify the inner
+        // error by its message: trailer/xref parse failures and truncation
+        // are xref damage, while e.g. "invalid file header" (not a PDF at
+        // all) keeps its original message.
+        lopdf::Error::Parse(inner) => {
+            let message = inner.to_string();
+            message.contains("trailer")
+                || message.contains("cross reference")
+                || message.contains("end of input")
+        }
+        _ => false,
+    };
+    if xref_class {
+        PdfOpsError::InvalidStructure(format!(
+            "{}: damaged cross-reference table or trailer ({err}); automatic repair \
+             failed — a dedicated repair tool (e.g. `qpdf file.pdf repaired.pdf`) may \
+             still recover it",
+            path.display()
+        ))
+    } else {
+        decorate_load_error(err, path)
+    }
+}
+
 /// Reject documents lopdf could not decrypt during the load, which happens
 /// when an input is encrypted with a non-empty user password and no (or an
 /// empty) password was supplied.

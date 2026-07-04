@@ -6,6 +6,7 @@ pub mod merge;
 pub mod range;
 #[cfg(feature = "render")]
 pub mod render;
+mod repair;
 mod scan;
 pub mod split;
 mod split_template;

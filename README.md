@@ -10,9 +10,10 @@ Runtime constraints:
 
 The first implementation uses `lopdf` as a pure-Rust PDF object model and
 writer. It focuses on valid split/merge outputs for ordinary PDFs. Advanced
-qpdf behavior such as repair, linearization, forms, outlines, and full
-compatibility with unusual historical PDFs is intentionally out of scope for
-the current MVP.
+qpdf behavior such as linearization, forms, outlines, and full compatibility
+with unusual historical PDFs is intentionally out of scope for the current
+MVP. Damaged cross-reference data is the one repair pdq performs — see
+[Repair](#repair).
 
 Encrypted PDFs (RC4, AES-128, AES-256) are supported as inputs: files are
 decrypted while loading, and outputs are always written unencrypted (like
@@ -51,6 +52,24 @@ of `split`, `split-pages`, and `merge` are written decrypted either way.
 
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.
+
+## Repair
+
+Files with damaged cross-reference data — truncated or garbage xref tables,
+destroyed trailers, tables whose offsets point at the wrong objects — are
+repaired automatically, the way qpdf, Poppler, and pdf.js recover them: the
+raw file is scanned for `N G obj` headers and the cross-reference table is
+rebuilt from what is actually there (best effort). Repair is strictly a last
+resort and never runs on well-formed files: it only starts after the normal
+parse fails, or after a fetch proves the xref lies about an offset, so
+healthy files pay nothing for it. A repaired read emits one warning line on
+stderr, and outputs built from a repaired source are always full rewrites
+with a fresh, valid xref — never byte copies of the damage.
+
+Two classes stay hard errors by design: encrypted files with damaged xref
+data (repair cannot decrypt; the error suggests a dedicated repair tool), and
+files where no catalog can be recovered at all. In both cases the error names
+the damaged cross-reference data rather than a generic parse failure.
 
 ## Render
 
