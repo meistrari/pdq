@@ -6,15 +6,15 @@
 [![MSRV](https://img.shields.io/crates/msrv/pdq)](#feature-flags-and-msrv)
 
 **PDF split, merge, page-count, and render — pretty damn quick.** A single
-pure-Rust binary and library with no C dependencies: pdq never invokes the
-`qpdf` binary, never wraps a subprocess, and never links libqpdf through FFI.
+pure-Rust binary and library: no C dependencies, no external tools, no
+subprocesses.
 
-pdq splits a 200 MB, 12,732-page PDF into one file per page in **1.05 s**
-(qpdf: 4.94 s), counts its pages in **6 ms**, and extracts a 100-page range
-from the middle of it in **37 ms**. On a court PDF whose pages all share one
-resources dictionary, qpdf and Poppler both blow through a two-minute
-timeout; pdq finishes in **280 ms**. Full numbers, validation method, and
-reproduction steps in [Performance](#performance).
+pdq splits a 200 MB, 12,732-page PDF into one file per page in **1.05 s**,
+counts its pages in **6 ms**, and extracts a 100-page range from the middle
+of it in **37 ms**. On a court PDF whose pages all share one resources
+dictionary, established tools blow through a two-minute timeout; pdq
+finishes in **280 ms**. Full numbers, validation method, and reproduction
+steps in [Performance](#performance).
 
 ![pdq benchmarks — real-world PDFs vs qpdf, MuPDF and Poppler](assets/benchmark.svg)
 
@@ -23,17 +23,16 @@ reproduction steps in [Performance](#performance).
 - **Fast on pathological files.** Memory-mapped input, an xref-only
   bootstrap, lazy object parsing, and parallel output writes mean cost
   scales with the pages you touch, not the file you opened.
-- **Zero system dependencies.** One self-contained binary. No qpdf, no
-  Poppler, no Java, no shelling out — nothing to apt-install in the
-  container image.
+- **Zero system dependencies.** One self-contained binary, no shelling out —
+  nothing to apt-install in the container image.
 - **Encrypted inputs just work.** RC4, AES-128, and AES-256 PDFs are
   decrypted on load. Owner-password-only files (the common case) open
   without any flags; real passwords go through `--password`.
 - **Damaged files are repaired.** Truncated or lying cross-reference tables
-  are rebuilt by scanning the raw file — the same recovery strategy as qpdf,
-  Poppler, and pdf.js — automatically and only when needed.
-- **qpdf-style page ranges.** `1-3`, `4-z`, `r2`, `7-3,1,r1` — the syntax
-  you already know from `qpdf --pages`.
+  are rebuilt by scanning the raw file — the same recovery strategy
+  mainstream PDF readers use — automatically and only when needed.
+- **Expressive page ranges.** `1-3`, `4-z`, `r2`, `7-3,1,r1` — pick pages
+  from either end of the document, in any order.
 - **CLI and library.** Everything the CLI does is a `pdq::` function call
   away, plus library-only extras like per-input page selection on merge.
 
@@ -139,9 +138,9 @@ input — see [Using pdq as a library](#using-pdq-as-a-library).
 pdq page-count [--strict] [--password PW] input.pdf
 ```
 
-By default pdq trusts the root `/Pages` `/Count` — the same semantics as
-`qpdf --show-npages` — and automatically falls back to a validated page-tree
-walk when `/Count` is missing, malformed, negative, or implausibly large.
+By default pdq trusts the root `/Pages` `/Count` and automatically falls
+back to a validated page-tree walk when `/Count` is missing, malformed,
+negative, or implausibly large.
 Pass `--strict` to force the validated walk: it counts the exact leaf pages
 `split`/`split-pages` would resolve and is immune to lying metadata.
 
@@ -164,8 +163,7 @@ with a real user password cannot be rendered.
 
 ### Page ranges
 
-The syntax follows qpdf. Page numbers are 1-based; `z` and `rN` count from
-the end of the document.
+Page numbers are 1-based; `z` and `rN` count from the end of the document.
 
 | Expression | Selects |
 | --- | --- |
@@ -183,8 +181,7 @@ Out-of-bounds pages are an error, not silently clamped.
 ## Encrypted PDFs
 
 Encrypted inputs (RC4, AES-128, AES-256) are decrypted while loading, and
-outputs are always written unencrypted — the same behavior as
-`qpdf --decrypt`.
+outputs are always written unencrypted.
 
 Files encrypted with only an owner password — the overwhelmingly common
 "permissions" encryption — open with no flags at all, because the empty user
@@ -196,7 +193,7 @@ password is reported as exactly that, not as a parse failure.
 
 Files with damaged cross-reference data — truncated or garbage xref tables,
 destroyed trailers, tables whose offsets point at the wrong objects — are
-repaired automatically, the way qpdf, Poppler, and pdf.js recover them: the
+repaired automatically, the way mainstream PDF readers recover them: the
 raw file is scanned for `N G obj` headers and the cross-reference table is
 rebuilt from what is actually there, best effort.
 
@@ -285,7 +282,7 @@ use std::path::Path;
 use pdq::{MergeInput, PageRangeGroup, SplitOutput};
 
 fn main() -> pdq::Result<()> {
-    // Fast page count (trusts /Count, like `qpdf --show-npages`);
+    // Fast page count (trusts the document's /Count);
     // pdq::page_count is the validated page-tree walk.
     let pages = pdq::page_count_fast(Path::new("big.pdf"))?;
     println!("{pages} pages");
@@ -353,9 +350,6 @@ not a general PDF rewriting toolkit:
   resources are what is preserved.
 - `render` cannot take a password (see [`pdq render`](#pdq-render--rasterize-to-png)).
 
-If you need those, qpdf remains the right tool; pdq's test suite happily
-uses it as a ground-truth validator.
-
 ## Development
 
 ```sh
@@ -364,8 +358,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Tests use `qpdf` as a development-time validator when it is on `PATH`; the
-runtime implementation must remain qpdf-free.
+Tests use `qpdf` as a development-time validator when it is on `PATH`; it is
+never a runtime dependency.
 
 `tests/real_world.rs` builds raw-byte replicas of the two court-document
 families from the benchmark corpus (deep balanced page tree with an image
