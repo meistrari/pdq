@@ -88,8 +88,8 @@ fn resolve_split_outputs(
             // XObjects) to prove usage is pure overhead. Matches qpdf's
             // `--remove-unreferenced-resources=auto`, which skips pruning for
             // whole-file copies.
-            let prune_resources = subsets_only
-                || page_ids.iter().collect::<BTreeSet<_>>().len() < pages.len();
+            let prune_resources =
+                subsets_only || page_ids.iter().collect::<BTreeSet<_>>().len() < pages.len();
             Ok(ResolvedSplitOutput {
                 path: output.path.clone(),
                 page_ids,

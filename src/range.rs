@@ -214,7 +214,9 @@ mod tests {
     #[test]
     fn bounded_max_page_reports_numeric_endpoints() {
         assert_eq!(
-            PageRangeGroup::parse("5000-5100").unwrap().bounded_max_page(),
+            PageRangeGroup::parse("5000-5100")
+                .unwrap()
+                .bounded_max_page(),
             Some(5100)
         );
         assert_eq!(
@@ -225,10 +227,18 @@ mod tests {
 
     #[test]
     fn bounded_max_page_is_none_for_document_relative_endpoints() {
-        assert_eq!(PageRangeGroup::parse("1-z").unwrap().bounded_max_page(), None);
-        assert_eq!(PageRangeGroup::parse("r2").unwrap().bounded_max_page(), None);
         assert_eq!(
-            PageRangeGroup::parse("1-3,r1-z").unwrap().bounded_max_page(),
+            PageRangeGroup::parse("1-z").unwrap().bounded_max_page(),
+            None
+        );
+        assert_eq!(
+            PageRangeGroup::parse("r2").unwrap().bounded_max_page(),
+            None
+        );
+        assert_eq!(
+            PageRangeGroup::parse("1-3,r1-z")
+                .unwrap()
+                .bounded_max_page(),
             None
         );
     }

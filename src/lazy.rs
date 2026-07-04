@@ -572,7 +572,7 @@ mod tests {
     use lopdf::{Object, Stream};
 
     use super::{
-        cacheable_normal_object, NormalObjectCache, Arc, NORMAL_CACHE_MAX_STREAM_BYTES,
+        cacheable_normal_object, Arc, NormalObjectCache, NORMAL_CACHE_MAX_STREAM_BYTES,
         NORMAL_CACHE_SHARDS, NORMAL_CACHE_SHARD_LIMIT,
     };
 

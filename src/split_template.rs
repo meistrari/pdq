@@ -166,9 +166,7 @@ impl SinglePageTemplate {
                 ));
             }
             let offset = u32::try_from(buffer.len()).map_err(|_| {
-                PdfOpsError::InvalidStructure(
-                    "split output offset exceeds PDF xref limit".into(),
-                )
+                PdfOpsError::InvalidStructure("split output offset exceeds PDF xref limit".into())
             })?;
             writeln!(xref_tail, "{offset:010} 00000 n ")?;
             writeln!(buffer, "{id} 0 obj")?;
