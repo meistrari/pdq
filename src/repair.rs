@@ -90,14 +90,6 @@ pub(crate) fn with_repair_retry<'a, T>(
 /// recoverable objects, or no root that resolves to a catalog — in which case
 /// callers surface their original error.
 pub(crate) fn reconstruct_document(buffer: &[u8]) -> Option<Document> {
-    // Encrypted inputs cannot be repaired: object streams and strings would
-    // come out still encrypted. The token search is conservative (a literal
-    // "/Encrypt" inside page content also refuses), but a false hit only
-    // means keeping today's hard error instead of attempting repair.
-    if memmem::find(buffer, b"/Encrypt").is_some() {
-        return None;
-    }
-
     let headers = scan_object_headers(buffer);
     if headers.is_empty() {
         return None;
@@ -125,7 +117,20 @@ pub(crate) fn reconstruct_document(buffer: &[u8]) -> Option<Document> {
         }
     }
 
-    let trailer_source = recover_trailer_dict(buffer, &xref_trailers);
+    let trailers = recover_trailers(buffer, &xref_trailers);
+    // Encrypted inputs cannot be repaired: object streams and strings would
+    // come out still encrypted. A parsed trailer or xref-stream dictionary
+    // naming /Encrypt is authoritative; when none carries a root (the
+    // lowest-trust catalog-fallback path) a raw byte scan for an
+    // `/Encrypt N G R` entry backstops files whose trailers were destroyed
+    // along with the encryption reference they held.
+    if trailers.saw_encrypt {
+        return None;
+    }
+    if trailers.best.is_none() && contains_encrypt_reference(buffer) {
+        return None;
+    }
+    let trailer_source = trailers.best;
 
     // Root candidates in order of trust: the recovered trailer's /Root
     // (generation normalized to the scanned header when they disagree, since
@@ -334,11 +339,21 @@ fn parse_header_dict(buffer: &[u8], offset: u32) -> Option<(Dictionary, usize)> 
     }
 }
 
-/// Recover a trailer dictionary: the last parseable `trailer` dict carrying a
-/// /Root reference wins; xref-stream files (no `trailer` keyword) fall back
-/// to the last recovered /Type /XRef dictionary, which doubles as a trailer.
-fn recover_trailer_dict(buffer: &[u8], xref_trailers: &[(u32, Dictionary)]) -> Option<Dictionary> {
+/// Everything trailer recovery learns about the file.
+struct RecoveredTrailers {
+    /// The trailer to trust: the last parseable `trailer` dict carrying a
+    /// /Root reference, else the last recovered /Type /XRef dictionary
+    /// (xref-stream files have no `trailer` keyword; their stream dict
+    /// doubles as the trailer).
+    best: Option<Dictionary>,
+    /// True when ANY parseable trailer or xref-stream dictionary named
+    /// /Encrypt — including root-less ones the recovery would not use.
+    saw_encrypt: bool,
+}
+
+fn recover_trailers(buffer: &[u8], xref_trailers: &[(u32, Dictionary)]) -> RecoveredTrailers {
     let mut best: Option<Dictionary> = None;
+    let mut saw_encrypt = false;
     for pos in memmem::find_iter(buffer, b"trailer") {
         if pos > 0 {
             let prev = buffer[pos - 1];
@@ -353,6 +368,7 @@ fn recover_trailer_dict(buffer: &[u8], xref_trailers: &[(u32, Dictionary)]) -> O
         let Some(Object::Dictionary(dict)) = lexer.parse_object(0) else {
             continue;
         };
+        saw_encrypt |= dict.has(b"Encrypt");
         if dict
             .get(b"Root")
             .map(|root| root.as_reference().is_ok())
@@ -361,7 +377,8 @@ fn recover_trailer_dict(buffer: &[u8], xref_trailers: &[(u32, Dictionary)]) -> O
             best = Some(dict);
         }
     }
-    best.or_else(|| {
+    saw_encrypt |= xref_trailers.iter().any(|(_, dict)| dict.has(b"Encrypt"));
+    let best = best.or_else(|| {
         xref_trailers
             .iter()
             .filter(|(_, dict)| {
@@ -371,6 +388,35 @@ fn recover_trailer_dict(buffer: &[u8], xref_trailers: &[(u32, Dictionary)]) -> O
             })
             .max_by_key(|(offset, _)| *offset)
             .map(|(_, dict)| dict.clone())
+    });
+    RecoveredTrailers { best, saw_encrypt }
+}
+
+/// True when the buffer contains what looks like a trailer's encryption
+/// entry: the `/Encrypt` name followed by an `N G R` reference. Requiring the
+/// reference tail keeps prose mentions of "/Encrypt" inside page content from
+/// blocking repair, while still catching encrypted files whose trailer
+/// dictionaries no longer parse.
+fn contains_encrypt_reference(buffer: &[u8]) -> bool {
+    memmem::find_iter(buffer, b"/Encrypt").any(|pos| {
+        let mut lexer = Lexer {
+            buffer,
+            pos: pos + b"/Encrypt".len(),
+        };
+        // The name must end here (`/EncryptMetadata` is a different key).
+        match lexer.peek() {
+            Some(byte) if is_whitespace(byte) || is_delimiter(byte) => {}
+            _ => return false,
+        }
+        (|| {
+            lexer.skip_whitespace();
+            lexer.parse_unsigned::<u32>()?;
+            lexer.skip_whitespace();
+            lexer.parse_unsigned::<u16>()?;
+            lexer.skip_whitespace();
+            lexer.try_keyword(b"R").then_some(())
+        })()
+        .is_some()
     })
 }
 
@@ -429,7 +475,9 @@ fn expand_object_stream(
             index: index as u16,
         });
         if let (Some(catalogs), Some(first)) = (member_catalogs.as_deref_mut(), first) {
-            let start = first.checked_add(member_offset as usize);
+            let start = usize::try_from(member_offset)
+                .ok()
+                .and_then(|offset| first.checked_add(offset));
             if let Some(start) = start.filter(|start| *start < decoded.len()) {
                 let mut member = Lexer {
                     buffer: &decoded,
@@ -667,6 +715,15 @@ mod tests {
         // Encrypted: the lazy reader cannot decrypt, so repair must refuse.
         let pdf = damaged_pdf(b"", b"trailer\n<< /Root 1 0 R /Encrypt 9 0 R >>\n%%EOF\n");
         assert!(reconstruct_document(&pdf).is_none());
+        // A root-less (unusable) trailer naming /Encrypt still proves
+        // encryption and must refuse.
+        let pdf = damaged_pdf(b"", b"trailer\n<< /Encrypt 9 0 R >>\n%%EOF\n");
+        assert!(reconstruct_document(&pdf).is_none());
+        // No parseable trailer at all, but the destroyed one's
+        // `/Encrypt N G R` entry survives in the raw bytes: the byte-scan
+        // backstop on the catalog-fallback path must refuse.
+        let pdf = damaged_pdf(b"", b"trailer garbage /Encrypt 9 0 R garbage\n%%EOF\n");
+        assert!(reconstruct_document(&pdf).is_none());
         // No object headers at all.
         assert!(reconstruct_document(b"not a pdf, no objects here").is_none());
         // Headers but no catalog and no trailer: nothing to trust as root.
@@ -674,6 +731,34 @@ mod tests {
             reconstruct_document(b"%PDF-1.4\n1 0 obj\n<< /Type /Font >>\nendobj\n%%EOF\n")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn prose_encrypt_mentions_do_not_block_repair() {
+        // "/Encrypt" appearing as page content (here: inside a string object)
+        // is not an encryption entry: no reference tail follows, and the
+        // recovered trailer is authoritative about the file being plain.
+        let mut pdf = damaged_pdf(b"", b"");
+        pdf.extend_from_slice(b"4 0 obj\n(how /Encrypt works in PDF)\nendobj\n");
+        pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\nstartxref\n999999\n%%EOF\n");
+        assert!(
+            reconstruct_document(&pdf).is_some(),
+            "a prose /Encrypt mention must not block repair"
+        );
+
+        // Same file without any recoverable trailer: the byte-scan backstop
+        // runs, but must still not match a name lacking the reference tail.
+        let mut pdf = damaged_pdf(b"", b"");
+        pdf.extend_from_slice(b"4 0 obj\n(how /Encrypt works in PDF)\nendobj\n%%EOF\n");
+        assert!(
+            reconstruct_document(&pdf).is_some(),
+            "prose /Encrypt without an N G R tail must not trip the backstop"
+        );
+
+        // /EncryptMetadata is a different key and must not match either.
+        let mut pdf = damaged_pdf(b"", b"");
+        pdf.extend_from_slice(b"4 0 obj\n<< /EncryptMetadata 5 0 R >>\nendobj\n%%EOF\n");
+        assert!(reconstruct_document(&pdf).is_some());
     }
 
     #[test]
