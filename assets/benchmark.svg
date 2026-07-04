@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 1156" width="920" height="1156" role="img" aria-label="pdq benchmark results against qpdf, MuPDF and Poppler">
+<title>pdq benchmarks — real-world PDFs</title>
+<style>
+  text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .surface { fill: #fcfcfb; }
+  .border  { stroke: rgba(11,11,11,0.10); }
+  .ink1  { fill: #0b0b0b; }
+  .ink2  { fill: #52514e; }
+  .muted { fill: #898781; }
+  .accent { fill: #2a78d6; }
+  .gray   { fill: #c3c2b7; }
+  .inbar  { fill: #52514e; }
+  .hatchline { stroke: #b5b3ab; }
+  .hatchbg   { fill: #f0efec; }
+  .crit  { fill: #d03b3b; }
+  .break { stroke: #fcfcfb; }
+  .rule  { stroke: #e1e0d9; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; }
+    .border  { stroke: rgba(255,255,255,0.10); }
+    .ink1  { fill: #ffffff; }
+    .ink2  { fill: #c3c2b7; }
+    .muted { fill: #898781; }
+    .accent { fill: #3987e5; }
+    .gray   { fill: #52514e; }
+    .inbar  { fill: #c3c2b7; }
+    .hatchline { stroke: #52514e; }
+    .hatchbg   { fill: #242423; }
+    .crit  { fill: #e66767; }
+    .break { stroke: #1a1a19; }
+    .rule  { stroke: #2c2c2a; }
+  }
+</style>
+<defs>
+  <pattern id="hatch" patternUnits="userSpaceOnUse" width="7" height="7" patternTransform="rotate(45)">
+    <line x1="0" y1="0" x2="0" y2="7" stroke-width="1.6" class="hatchline"/>
+  </pattern>
+</defs>
+<rect class="surface border" x="0.5" y="0.5" width="919" height="1155" rx="14" stroke-width="1"/>
+<text class="ink1" x="40" y="60" font-size="19" font-weight="650">pdq benchmarks</text>
+<text class="ink2" x="40" y="86" font-size="13">Real-world court PDFs &#183; pdq <tspan class="muted">vs</tspan> qpdf, MuPDF (mutool) and Poppler &#183; lower is better</text>
+<rect class="accent" x="828" y="52" width="9" height="9" rx="2"/>
+<text class="ink2" x="842" y="60" font-size="12">pdq</text>
+<text class="ink1" x="40" y="148" font-size="13.5" font-weight="600">Page count<tspan class="muted" font-weight="400" dx="10">12,732 pages · 200 MB</tspan></text>
+<text class="ink2" x="102" y="177.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,166.0 h172.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-172.9 Z"/>
+<text class="ink1" x="300.9" y="177.0" font-size="12" font-weight="650">6.1 ms</text>
+<text class="ink2" x="102" y="203.0" font-size="12" text-anchor="end">qpdf</text>
+<path class="gray" d="M114.0,192.0 h416.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-416.5 Z"/>
+<text class="ink2" x="544.5" y="203.0" font-size="12" font-weight="400">14.5 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">2.4×</tspan></text>
+<text class="ink2" x="102" y="229.0" font-size="12" text-anchor="end">Poppler</text>
+<path class="gray" d="M114.0,218.0 h590.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-590.5 Z"/>
+<text class="ink2" x="718.5" y="229.0" font-size="12" font-weight="400">20.5 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">3.4×</tspan></text>
+<text class="ink2" x="102" y="255.0" font-size="12" text-anchor="end">MuPDF</text>
+<path class="gray" d="M114.0,244.0 h750.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-750.0 Z"/>
+<line class="break" x1="822" y1="242" x2="816" y2="260" stroke-width="3.5"/>
+<line class="break" x1="829" y1="242" x2="823" y2="260" stroke-width="3.5"/>
+<text class="inbar" x="810" y="255.0" font-size="11.5" text-anchor="end" font-weight="500">1.29 s<tspan font-weight="400" dx="5">&#183;</tspan><tspan font-weight="400" dx="5">211×</tspan></text>
+<text class="ink1" x="40" y="308" font-size="13.5" font-weight="600">Split into single pages<tspan class="muted" font-weight="400" dx="10">12,732 pages · 200 MB</tspan></text>
+<text class="ink2" x="102" y="337.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,326.0 h131.6 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-131.6 Z"/>
+<text class="ink1" x="259.60728744939274" y="337.0" font-size="12" font-weight="650">1.05 s</text>
+<text class="ink2" x="102" y="363.0" font-size="12" text-anchor="end">qpdf</text>
+<path class="gray" d="M114.0,352.0 h634.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-634.0 Z"/>
+<text class="ink2" x="762.0" y="363.0" font-size="12" font-weight="400">4.94 s<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">4.7×</tspan></text>
+<text class="ink2" x="102" y="389.0" font-size="12" text-anchor="end">Poppler</text>
+<rect class="hatchbg" x="114" y="378" width="754.0" height="14" rx="4"/>
+<rect fill="url(#hatch)" x="114" y="378" width="754.0" height="14" rx="4"/>
+<text class="ink2" x="124" y="389.0" font-size="11.5">&#215;  timeout &#8212; 6 of 12,732 files after 120 s</text>
+<text class="ink1" x="40" y="442" font-size="13.5" font-weight="600">Split into single pages<tspan class="muted" font-weight="400" dx="10">2,642 pages · 26 MB</tspan></text>
+<text class="ink2" x="102" y="471.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,460.0 h85.3 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-85.3 Z"/>
+<text class="ink1" x="213.32" y="471.0" font-size="12" font-weight="650">280 ms</text>
+<text class="ink2" x="102" y="497.0" font-size="12" text-anchor="end">qpdf</text>
+<rect class="hatchbg" x="114" y="486" width="754.0" height="14" rx="4"/>
+<rect fill="url(#hatch)" x="114" y="486" width="754.0" height="14" rx="4"/>
+<text class="ink2" x="124" y="497.0" font-size="11.5">&#215;  timeout &#8212; 1,295 of 2,642 files after 120 s</text>
+<text class="ink2" x="102" y="523.0" font-size="12" text-anchor="end">Poppler</text>
+<rect class="hatchbg" x="114" y="512" width="754.0" height="14" rx="4"/>
+<rect fill="url(#hatch)" x="114" y="512" width="754.0" height="14" rx="4"/>
+<text class="ink2" x="124" y="523.0" font-size="11.5">&#215;  timeout &#8212; 113 of 2,642 files after 120 s</text>
+<text class="ink1" x="40" y="576" font-size="13.5" font-weight="600">Extract pages 5000–5100<tspan class="muted" font-weight="400" dx="10">from 12,732 pages</tspan></text>
+<text class="ink2" x="102" y="605.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,594.0 h62.8 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-62.8 Z"/>
+<text class="ink1" x="190.84662921348314" y="605.0" font-size="12" font-weight="650">37 ms</text>
+<text class="ink2" x="102" y="631.0" font-size="12" text-anchor="end">MuPDF</text>
+<path class="gray" d="M114.0,620.0 h103.5 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-103.5 Z"/>
+<text class="ink2" x="231.52808988764045" y="631.0" font-size="12" font-weight="400">60 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">1.6×</tspan></text>
+<text class="ink2" x="102" y="657.0" font-size="12" text-anchor="end">qpdf</text>
+<path class="gray" d="M114.0,646.0 h632.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-632.9 Z"/>
+<text class="ink2" x="760.9247191011236" y="657.0" font-size="12" font-weight="400">355 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">9.5×</tspan></text>
+<text class="ink1" x="40" y="710" font-size="13.5" font-weight="600">Full rewrite<tspan class="muted" font-weight="400" dx="10">2,642 pages</tspan></text>
+<text class="ink2" x="102" y="739.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,728.0 h368.2 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-368.2 Z"/>
+<text class="ink1" x="496.1666666666667" y="739.0" font-size="12" font-weight="650">109 ms</text>
+<text class="ink2" x="102" y="765.0" font-size="12" text-anchor="end">MuPDF</text>
+<path class="gray" d="M114.0,754.0 h429.6 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-429.6 Z"/>
+<text class="ink2" x="557.5655913978494" y="765.0" font-size="12" font-weight="400">126 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">1.2×</tspan></text>
+<text class="ink2" x="102" y="791.0" font-size="12" text-anchor="end">qpdf</text>
+<path class="gray" d="M114.0,780.0 h632.6 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-632.6 Z"/>
+<text class="ink2" x="760.6279569892473" y="791.0" font-size="12" font-weight="400">186 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">1.7×</tspan></text>
+<text class="ink1" x="40" y="844" font-size="13.5" font-weight="600">Full rewrite<tspan class="muted" font-weight="400" dx="10">12,732 pages · statistical tie</tspan></text>
+<text class="ink2" x="102" y="873.0" font-size="12" text-anchor="end">MuPDF</text>
+<path class="gray" d="M114.0,862.0 h394.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-394.9 Z"/>
+<text class="ink1" x="522.9318134715026" y="873.0" font-size="12" font-weight="650">603 ms</text>
+<text class="ink2" x="102" y="899.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,888.0 h416.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-416.7 Z"/>
+<text class="ink2" x="544.7494300518135" y="899.0" font-size="12" font-weight="400">636 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">&#8776; tie</tspan></text>
+<text class="ink2" x="102" y="925.0" font-size="12" text-anchor="end">qpdf</text>
+<path class="gray" d="M114.0,914.0 h633.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-633.7 Z"/>
+<text class="ink2" x="761.7355440414508" y="925.0" font-size="12" font-weight="400">965 ms<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">1.6×</tspan></text>
+<text class="ink1" x="40" y="978" font-size="13.5" font-weight="600">Merge<tspan class="muted" font-weight="400" dx="10">12,732 + 2,642 pages</tspan></text>
+<text class="ink2" x="102" y="1007.0" font-size="12" text-anchor="end">pdq</text>
+<path class="accent" d="M114.0,996.0 h52.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-52.0 Z"/>
+<text class="ink1" x="180.03597883597882" y="1007.0" font-size="12" font-weight="650">0.83 s</text>
+<text class="ink2" x="102" y="1033.0" font-size="12" text-anchor="end">qpdf</text>
+<path class="gray" d="M114.0,1022.0 h91.9 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-91.9 Z"/>
+<text class="ink2" x="219.9362962962963" y="1033.0" font-size="12" font-weight="400">1.42 s<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">1.7×</tspan></text>
+<text class="ink2" x="102" y="1059.0" font-size="12" text-anchor="end">MuPDF</text>
+<path class="gray" d="M114.0,1048.0 h633.7 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-633.7 Z"/>
+<text class="ink2" x="761.7299470899471" y="1059.0" font-size="12" font-weight="400">9.45 s<tspan class="muted" font-weight="400" dx="5">&#183;</tspan><tspan class="muted" font-weight="400" dx="5">11.4×</tspan></text>
+<text class="ink2" x="102" y="1085.0" font-size="12" text-anchor="end">Poppler</text>
+<path class="gray" d="M114.0,1074.0 h750.0 a4,4 0 0 1 4,4 v6.0 a4,4 0 0 1 -4,4 h-750.0 Z"/>
+<line class="break" x1="822" y1="1072" x2="816" y2="1090" stroke-width="3.5"/>
+<line class="break" x1="829" y1="1072" x2="823" y2="1090" stroke-width="3.5"/>
+<text class="inbar" x="810" y="1085.0" font-size="11.5" text-anchor="end" font-weight="500">24.8 s<tspan font-weight="400" dx="5">&#183;</tspan><tspan font-weight="400" dx="5">30×</tspan></text>
+<line class="rule" x1="40" y1="1110" x2="880" y2="1110" stroke-width="1"/>
+<text class="muted" x="40" y="1130" font-size="11">hyperfine mean, warmup 1 / 5 runs (page count: 10) &#183; 120 s timeout &#183; outputs validated with qpdf --check &#183; bars scaled per scenario, axis broken where marked</text>
+<text class="muted" x="40" y="1146" font-size="11">Apple M4 Max &#183; macOS &#183; qpdf 12.3.2 &#183; MuPDF 1.28.0 &#183; Poppler 26.02 &#183; 2026-07-04</text>
+</svg>
