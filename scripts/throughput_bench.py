@@ -18,6 +18,7 @@ and the report breaks ops/min and latency out per op.
 """
 import argparse
 import json
+import math
 import random
 import shlex
 import statistics
@@ -98,7 +99,7 @@ def main():
             "ops": n,
             "ops_per_min": round(n / window * 60, 1),
             "p50_s": round(statistics.median(latencies), 2) if n else None,
-            "p95_s": round(latencies[max(0, int(n * 0.95) - 1)], 2) if n else None,
+            "p95_s": round(latencies[max(0, math.ceil(n * 0.95) - 1)], 2) if n else None,
         }
 
     all_latencies = [l for per_op in results["latencies"].values() for l in per_op]
