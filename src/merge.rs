@@ -130,7 +130,7 @@ fn open_merge_source<'a>(
     }
 }
 
-fn merge_whole_inputs_streaming(
+pub(crate) fn merge_whole_inputs_streaming(
     inputs: &[MergeInput],
     output: &Path,
     password: Option<&str>,

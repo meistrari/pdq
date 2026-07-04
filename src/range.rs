@@ -50,6 +50,18 @@ impl PageRangeGroup {
         Some(max)
     }
 
+    /// True when the group is literally `1-z`: every page, in document
+    /// order, regardless of page count. This is the one range shape a caller
+    /// can prove keeps the whole document without resolving it first.
+    pub(crate) fn is_full_document(&self) -> bool {
+        let mut parts = self.raw.split(',');
+        let only = parts.next().map(str::trim);
+        parts.next().is_none()
+            && only
+                .and_then(|part| part.split_once('-'))
+                .is_some_and(|(start, end)| start.trim() == "1" && end.trim() == "z")
+    }
+
     pub fn resolve(&self, page_count: usize) -> Result<Vec<usize>, PageRangeError> {
         if page_count == 0 {
             return Err(PageRangeError::NoPages);
@@ -209,6 +221,19 @@ mod tests {
         let group = PageRangeGroup::parse("1-3,5").unwrap();
 
         assert_eq!(group.resolve(6).unwrap(), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn full_document_is_exactly_one_to_z() {
+        assert!(PageRangeGroup::parse("1-z").unwrap().is_full_document());
+        assert!(PageRangeGroup::parse(" 1 - z ").unwrap().is_full_document());
+
+        for subset in ["2-z", "1-5", "z", "r1-z", "1-z,1", "1,2-z"] {
+            assert!(
+                !PageRangeGroup::parse(subset).unwrap().is_full_document(),
+                "{subset} must not be treated as a whole-document rewrite"
+            );
+        }
     }
 
     #[test]

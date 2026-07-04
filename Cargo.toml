@@ -13,9 +13,11 @@ categories = ["command-line-utilities"]
 [features]
 default = ["render"]
 render = ["dep:hayro"]
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
+dhat = { version = "0.3", optional = true }
 hayro = { version = "0.7.1", features = ["embed-fonts"], optional = true }
 lopdf = "0.43.0"
 memchr = "2.7"

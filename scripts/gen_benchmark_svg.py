@@ -36,15 +36,15 @@ PANELS = [
         ("MuPDF", 60.0, "60 ms", "1.6×"),
         ("qpdf", 355.4, "355 ms", "9.5×"),
     ]),
-    dict(title="Full rewrite", sub="2,642 pages", cap=186.0, rows=[
-        ("pdq", 108.5, "109 ms", None),
-        ("MuPDF", 126.4, "126 ms", "1.2×"),
-        ("qpdf", 185.6, "186 ms", "1.7×"),
+    dict(title="Full rewrite", sub="2,642 pages", cap=136.3, rows=[
+        ("pdq", 86.6, "87 ms", None),
+        ("MuPDF", 115.9, "116 ms", "1.3×"),
+        ("qpdf", 136.3, "136 ms", "1.6×"),
     ]),
-    dict(title="Full rewrite", sub="12,732 pages · statistical tie", cap=965.0, rows=[
-        ("MuPDF", 603.4, "603 ms", None),
-        ("pdq", 636.4, "636 ms", "&#8776; tie"),
-        ("qpdf", 964.6, "965 ms", "1.6×"),
+    dict(title="Full rewrite", sub="12,732 pages · pdq peak heap 43 MB", cap=746.8, rows=[
+        ("MuPDF", 506.7, "507 ms", None),
+        ("pdq", 618.7, "619 ms", "1.2×"),
+        ("qpdf", 746.8, "747 ms", "1.5×"),
     ]),
     dict(title="Merge", sub="12,732 + 2,642 pages", cap=9450.0, rows=[
         ("pdq", 830, "0.83 s", None),
@@ -55,7 +55,10 @@ PANELS = [
 ]
 
 HEADER_H = 96
-FOOTER_H = 104
+FOOTER_H = 126
+FOOT_NOTE = ("Constrained server (4 GB &#183; 2 vCPU container): pdq sustains "
+             "2,120 mixed ops/min &#183; qpdf 532 &#183; zero OOM kills &#183; "
+             "scripts/throughput_bench.py")
 
 def panel_height(p):
     return PANEL_TITLE_H + len(p["rows"]) * ROW_PITCH
@@ -165,7 +168,7 @@ for i, p in enumerate(PANELS):
 fy = H - FOOTER_H + 10
 out.append(f'<line class="rule" x1="{PAD}" y1="{fy}" x2="{W - PAD}" y2="{fy}" stroke-width="1"/>')
 FOOT_COLS = [
-    ("Method", ["hyperfine mean &#183; warmup 1, 5 runs", "page count: 10 runs &#183; 120 s timeout"]),
+    ("Method", ["hyperfine mean &#183; warmup 1, 5 runs", "count &amp; rewrites: 10 runs &#183; 120 s timeout"]),
     ("Validation", ["every output checked with qpdf --check", "bars scaled per scenario &#183; axis breaks marked"]),
     ("Environment", ["Apple M4 Max &#183; qpdf 12.3.2 &#183; MuPDF 1.28.0", "Poppler 26.02 &#183; macOS &#183; 2026-07-04"]),
 ]
@@ -176,6 +179,7 @@ for ci, (label, lines) in enumerate(FOOT_COLS):
                f'letter-spacing="0.9" style="text-transform:uppercase">{label.upper()}</text>')
     for li, line in enumerate(lines):
         out.append(f'<text class="ink2" x="{cx:.0f}" y="{fy + 44 + li * 17}" font-size="11">{line}</text>')
+out.append(f'<text class="muted" x="{PAD}" y="{fy + 88}" font-size="11">{FOOT_NOTE}</text>')
 out.append('</svg>')
 
 svg = "\n".join(out)
