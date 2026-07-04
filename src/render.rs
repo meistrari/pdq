@@ -61,7 +61,7 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
         ..Default::default()
     };
 
-    selected.par_iter().try_for_each(|&page_number| {
+    let render_one = |&page_number: &usize| {
         let page = &pages[page_number - 1];
         let (page_width, page_height) = page.render_dimensions();
         if page_width * scale > MAX_PIXMAP_DIMENSION || page_height * scale > MAX_PIXMAP_DIMENSION {
@@ -85,7 +85,12 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
             png,
         )?;
         Ok(())
-    })
+    };
+
+    match rayon::ThreadPoolBuilder::new().build() {
+        Ok(pool) => pool.install(|| selected.par_iter().try_for_each(render_one)),
+        Err(_) => selected.iter().try_for_each(render_one),
+    }
 }
 
 fn load_error(err: LoadPdfError, input: &Path) -> PdfOpsError {

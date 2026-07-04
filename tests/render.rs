@@ -137,7 +137,10 @@ fn render_rejects_encrypted_inputs_with_unsupported_error() {
     .unwrap_err();
 
     assert!(matches!(error, PdfOpsError::Unsupported(_)));
-    assert!(!temp.path().join("enc-1.png").exists());
+    assert!(
+        std::fs::read_dir(temp.path()).unwrap().next().is_none(),
+        "no output should be written for encrypted input"
+    );
 }
 
 #[test]

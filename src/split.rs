@@ -115,7 +115,7 @@ pub(crate) fn validate_output_pattern(pattern: &str) -> Result<()> {
     let occurrences = pattern.match_indices("%d").count();
     if occurrences != 1 {
         return Err(PdfOpsError::InvalidStructure(
-            "split-pages output pattern must contain exactly one %d".into(),
+            "output pattern must contain exactly one %d".into(),
         ));
     }
     Ok(())
