@@ -6,6 +6,7 @@ pub mod merge;
 pub mod range;
 mod scan;
 pub mod split;
+mod split_template;
 mod write;
 mod xrefboot;
 

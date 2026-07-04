@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Deref,
     rc::Rc,
+    sync::Arc,
 };
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -16,6 +17,10 @@ const RESOURCE_PRUNE_MIN_NAMES: usize = 6;
 pub(crate) trait ObjectSource {
     fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error>;
 }
+
+/// Distilled inheritable page attributes per page-tree node. `Arc` (not `Rc`)
+/// so a pre-warmed cache can be shared across parallel split workers.
+pub(crate) type InheritedAttrsCache = BTreeMap<ObjectId, Arc<InheritedPageAttrs>>;
 
 impl ObjectSource for Document {
     fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error> {
@@ -42,7 +47,7 @@ impl Default for CopyOptions {
 pub struct CopyContext {
     object_map: BTreeMap<ObjectId, ObjectId>,
     dictionary_cache: BTreeMap<ObjectId, Rc<Dictionary>>,
-    inherited_attrs_cache: BTreeMap<ObjectId, Rc<InheritedPageAttrs>>,
+    inherited_attrs_cache: InheritedAttrsCache,
     used_names_cache: BTreeMap<ObjectId, Option<UsedNames>>,
     selected_pages: BTreeSet<ObjectId>,
     options: CopyOptions,
@@ -51,15 +56,46 @@ pub struct CopyContext {
 
 impl CopyContext {
     pub fn new(options: CopyOptions) -> Self {
+        Self::with_object_map(options, BTreeMap::new())
+    }
+
+    /// Create a context whose object map is pre-seeded with `old id -> new id`
+    /// mappings. Seeded objects are treated as already copied: references to
+    /// them are rewritten to the seeded ids and their contents are never
+    /// visited. Used by the split-pages template writer, which serializes the
+    /// shared object closure once and reuses it across every output.
+    pub(crate) fn with_object_map(
+        options: CopyOptions,
+        object_map: BTreeMap<ObjectId, ObjectId>,
+    ) -> Self {
+        Self::with_state(options, object_map, BTreeMap::new())
+    }
+
+    /// Like [`Self::with_object_map`], additionally pre-warming the
+    /// inherited-attributes cache. Resolving inheritable attributes otherwise
+    /// re-fetches page-tree ancestors per context — for a flat 12,000-page
+    /// tree that means cloning a 12,000-entry `/Kids` array per output.
+    pub(crate) fn with_state(
+        options: CopyOptions,
+        object_map: BTreeMap<ObjectId, ObjectId>,
+        inherited_attrs_cache: InheritedAttrsCache,
+    ) -> Self {
         Self {
-            object_map: BTreeMap::new(),
+            object_map,
             dictionary_cache: BTreeMap::new(),
-            inherited_attrs_cache: BTreeMap::new(),
+            inherited_attrs_cache,
             used_names_cache: BTreeMap::new(),
             selected_pages: BTreeSet::new(),
             options,
             prune_nested_resources: false,
         }
+    }
+
+    /// Consume the context, returning the `old id -> new id` map of every
+    /// source object visited by the copy (including seeded entries) plus the
+    /// inherited-attributes cache accumulated along the way.
+    pub(crate) fn into_state(self) -> (BTreeMap<ObjectId, ObjectId>, InheritedAttrsCache) {
+        (self.object_map, self.inherited_attrs_cache)
     }
 
     pub(crate) fn copy_page(
@@ -597,9 +633,9 @@ impl CopyContext {
         &mut self,
         source: &impl ObjectSource,
         id: ObjectId,
-    ) -> Result<Option<Rc<InheritedPageAttrs>>> {
+    ) -> Result<Option<Arc<InheritedPageAttrs>>> {
         if let Some(attrs) = self.inherited_attrs_cache.get(&id) {
-            return Ok(Some(Rc::clone(attrs)));
+            return Ok(Some(Arc::clone(attrs)));
         }
 
         let object = match source.get_object_value(id) {
@@ -610,8 +646,8 @@ impl CopyContext {
         let dict = object.as_dict().map_err(|_| {
             PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
         })?;
-        let attrs = Rc::new(InheritedPageAttrs::from_dict(dict));
-        self.inherited_attrs_cache.insert(id, Rc::clone(&attrs));
+        let attrs = Arc::new(InheritedPageAttrs::from_dict(dict));
+        self.inherited_attrs_cache.insert(id, Arc::clone(&attrs));
         Ok(Some(attrs))
     }
 }
@@ -633,7 +669,7 @@ impl Deref for ResolvedDictionary<'_> {
 }
 
 #[derive(Debug, Default)]
-struct InheritedPageAttrs {
+pub(crate) struct InheritedPageAttrs {
     resources: Option<Object>,
     media_box: Option<Object>,
     crop_box: Option<Object>,

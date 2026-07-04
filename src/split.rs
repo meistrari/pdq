@@ -11,6 +11,7 @@ use crate::{
     lazy::LazyPdf,
     load::{load_document, map_file},
     range::{PageRangeError, PageRangeGroup},
+    split_template::{SinglePageTemplate, WriteGate},
     PdfOpsError, Result,
 };
 
@@ -51,16 +52,59 @@ pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
     }
     let width = page_count.to_string().len();
     let resolved_outputs = (1..=page_count)
-        .zip(pages)
+        .zip(&pages)
         .map(|(page_number, page_id)| {
             Ok(ResolvedSplitOutput {
                 path: render_output_pattern(output_pattern, page_number, width)?,
-                page_ids: vec![page_id],
+                page_ids: vec![*page_id],
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // Fast path: serialize the objects shared by every page once, then emit
+    // only page-specific objects per output. Falls back to the generic
+    // per-output Document path whenever the template cannot be prepared.
+    if let Some(template) = SinglePageTemplate::prepare(&source, &pages) {
+        return run_template_outputs(&source, &template, &resolved_outputs);
+    }
+
     run_split_outputs(&source, &resolved_outputs)
+}
+
+/// Concurrent output-file writes allowed during a template split; see
+/// [`WriteGate`] for why this is small.
+const MAX_CONCURRENT_SPLIT_WRITES: usize = 4;
+
+fn run_template_outputs(
+    source: &(impl ObjectSource + Sync),
+    template: &SinglePageTemplate,
+    outputs: &[ResolvedSplitOutput],
+) -> Result<()> {
+    let gate = WriteGate::new(
+        std::env::var("PDQ_SPLIT_WRITERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(MAX_CONCURRENT_SPLIT_WRITES),
+    );
+    let run_one = |buffer: &mut Vec<u8>, output: &ResolvedSplitOutput| -> Result<()> {
+        template.write_page(source, output.page_ids[0], &output.path, buffer, &gate)
+    };
+
+    let pool = rayon::ThreadPoolBuilder::new().build();
+    match pool {
+        Ok(pool) => pool.install(|| {
+            outputs
+                .par_iter()
+                .try_for_each_init(Vec::new, |buffer, output| run_one(buffer, output))
+        })?,
+        Err(_) => {
+            let mut buffer = Vec::new();
+            outputs
+                .iter()
+                .try_for_each(|output| run_one(&mut buffer, output))?
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
