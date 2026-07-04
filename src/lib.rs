@@ -16,7 +16,7 @@ pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
 pub use range::{PageRangeError, PageRangeGroup};
 #[cfg(feature = "render")]
 pub use render::{render_pages, RenderOptions};
-pub use split::{split, split_pages, SplitOutput};
+pub use split::{split, split_pages, split_pages_with_options, SplitOutput, SplitPagesOptions};
 
 pub type Result<T> = std::result::Result<T, PdfOpsError>;
 
