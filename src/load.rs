@@ -5,8 +5,13 @@ use memmap2::{Mmap, MmapOptions};
 
 use crate::{range::PageRangeError, PdfOpsError, Result};
 
+/// Eagerly parse the whole document. Still the right source for
+/// whole-document copies: objects are parsed once (in parallel) and then
+/// borrowed during the copy, which beats per-object lazy fetches when the
+/// copy will touch every object anyway.
 pub(crate) fn load_document(path: &Path) -> Result<Document> {
-    let document = load_document_mmap(path)?;
+    let mmap = map_file(path)?;
+    let document = Document::load_mem_with_options(&mmap, LoadOptions::default())?;
     if document.is_encrypted() || document.was_encrypted() {
         return Err(PdfOpsError::Unsupported(format!(
             "encrypted PDFs are not supported: {}",
@@ -17,14 +22,6 @@ pub(crate) fn load_document(path: &Path) -> Result<Document> {
         return Err(PdfOpsError::Range(PageRangeError::NoPages));
     }
     Ok(document)
-}
-
-fn load_document_mmap(path: &Path) -> Result<Document> {
-    let mmap = map_file(path)?;
-    Ok(Document::load_mem_with_options(
-        &mmap,
-        LoadOptions::default(),
-    )?)
 }
 
 pub(crate) fn map_file(path: &Path) -> Result<Mmap> {

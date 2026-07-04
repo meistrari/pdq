@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -22,30 +22,69 @@ pub struct SplitOutput {
 }
 
 pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
+    // When every requested range is bounded (no `z`/`rN` endpoint), the page
+    // walk can stop at the highest page any output needs — extracting a small
+    // range from a huge document must not pay for parsing or enumerating the
+    // rest. Unbounded ranges enumerate every page anyway and usually copy
+    // most of the document, where the eager parse-once source beats
+    // per-object lazy fetches.
+    let walk_limit = outputs
+        .iter()
+        .map(|output| output.range.bounded_max_page())
+        .collect::<Option<Vec<_>>>()
+        .and_then(|maxes| maxes.into_iter().max());
+
+    if let Some(limit) = walk_limit {
+        // Lazy, mmap-backed source (same as `split-pages`): xref-only
+        // bootstrap plus a walk that stops at `limit` pages. A shorter result
+        // means the document really has fewer pages, so the bounds checks in
+        // `resolve` still see the true count. Every bounded output is treated
+        // as a subset (a prefix walk cannot prove full coverage), so pruning
+        // stays on.
+        let mmap = map_file(input)?;
+        let source = LazyPdf::parse(&mmap, input)?;
+        let ordered_pages = source.page_ids_up_to(limit)?;
+        if ordered_pages.is_empty() {
+            return Err(PdfOpsError::Range(PageRangeError::NoPages));
+        }
+        let pages: BTreeMap<u32, lopdf::ObjectId> = (1u32..).zip(ordered_pages).collect();
+        let resolved_outputs = resolve_split_outputs(outputs, &pages, true)?;
+        reject_duplicate_output_paths(&resolved_outputs)?;
+        return run_split_outputs(&source, &resolved_outputs);
+    }
+
     let source = load_document(input)?;
     let pages = source.get_pages();
-    let resolved_outputs = outputs
+    let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
+    reject_duplicate_output_paths(&resolved_outputs)?;
+    run_split_outputs(&source, &resolved_outputs)
+}
+
+fn resolve_split_outputs(
+    outputs: &[SplitOutput],
+    pages: &BTreeMap<u32, lopdf::ObjectId>,
+    subsets_only: bool,
+) -> Result<Vec<ResolvedSplitOutput>> {
+    outputs
         .iter()
         .map(|output| {
             let page_numbers = output.range.resolve(pages.len())?;
-            let page_ids = resolve_page_ids(&pages, &page_numbers)?;
+            let page_ids = resolve_page_ids(pages, &page_numbers)?;
             // Pruning unreferenced resources only pays when the output keeps a
             // subset of the pages: a full-document copy retains every resource
             // anyway, so scanning each page's content (and nested form
             // XObjects) to prove usage is pure overhead. Matches qpdf's
             // `--remove-unreferenced-resources=auto`, which skips pruning for
             // whole-file copies.
-            let prune_resources = page_ids.iter().collect::<BTreeSet<_>>().len() < pages.len();
+            let prune_resources = subsets_only
+                || page_ids.iter().collect::<BTreeSet<_>>().len() < pages.len();
             Ok(ResolvedSplitOutput {
                 path: output.path.clone(),
                 page_ids,
                 prune_resources,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
-    reject_duplicate_output_paths(&resolved_outputs)?;
-
-    run_split_outputs(&source, &resolved_outputs)
+        .collect()
 }
 
 pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {

@@ -144,17 +144,28 @@ range/merge page counts 12732 / 2642 / 101 / 15374 all `--check` OK.
 | split 2,642p → 1-page files | **280 ms ± 7** | >120 s (1,295 of 2,642) | n/a | >120 s (113 files) |
 | rewrite 12,732p | 636 ms ± 65 | 965 ms ± 57 | **603 ms ± 25** (tie, 1.05× ± 0.12) | — |
 | rewrite 2,642p | **108 ms ± 9** | 186 ms ± 3 | 126 ms ± 3 | — |
-| range 5000–5100 of 12,732p | 163 ms ± 15 | 353 ms ± 5 | **65 ms ± 1** | — |
+| range 5000–5100 of 12,732p | **37 ms ± 1** | 355 ms ± 24 | 60 ms ± 1 | — |
 | merge 12,732 + 2,642 | **830 ms ± 47** | 1.42 s ± 0.03 | 9.45 s ± 0.22 | 24.8 s (single run) |
 
-Reading: on the pathological corpus pdq is now the fastest tool at count
-(2.4× over qpdf; the old validated walk itself got 5× faster than the
-pre-optimization 46 ms), split (4.7× over qpdf on the big file; only tool to
-finish the small one, 280 ms vs >120 s), merge (1.7× over qpdf), and rewrite
-of the 2,642-page file; big-file rewrite is a statistical tie with MuPDF.
-Only range extraction remains MuPDF's (65 vs 163 ms). pdq split wall time vs
-the pre-optimization README snapshot: 12,732-page split 1.75 → 1.05 s,
-2,642-page split 0.55 → 0.28 s.
+Reading: on the pathological corpus pdq is now the fastest tool in every
+scenario except big-file rewrite, which is a statistical tie with MuPDF
+(636 ms ± 65 vs 603 ms ± 25): count 2.4× over qpdf (the old validated walk
+itself got 5× faster than the pre-optimization 46 ms), split 4.7× over qpdf
+on the big file and the only tool to finish the small one (280 ms vs
+>120 s), range extraction 1.6× over MuPDF (37 vs 60 ms; was a 2.5× loss at
+163 ms), rewrite of the 2,642-page file 1.15× over MuPDF, and merge 1.7×
+over qpdf. pdq split wall time vs the pre-optimization README snapshot:
+12,732-page split 1.75 → 1.05 s, 2,642-page split 0.55 → 0.28 s.
+
+Range extraction was fixed in two steps after profiling showed the eager
+full parse and then the full page-tree walk dominating: (1) `split` now uses
+the same lazy xref-bootstrap source as `split-pages`, and (2) when every
+requested range is bounded (no `z`/`rN` endpoint), the page walk stops at
+the highest page any output needs — extracting 101 pages from a 12,732-page
+file enumerates only the first 5,100. Unbounded ranges (`1-z` rewrites)
+keep the eager parse-once source, which is faster when the copy touches
+every object anyway; subset pruning semantics are unchanged (a prefix walk
+never disables pruning).
 
 The 2,642-page rewrite was this corpus's last blowout loss (1.07 s, 9×
 behind MuPDF) and was root-caused by profiling: the file is a court-merge

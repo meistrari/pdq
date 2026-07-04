@@ -75,6 +75,20 @@ impl<'a> LazyPdf<'a> {
         Ok(page_ids)
     }
 
+    /// Collect the ids of the first `limit` pages in document order, stopping
+    /// the walk as soon as that many leaves were seen. Returns fewer ids when
+    /// the document has fewer pages — the caller learns the true count from
+    /// the result length. Shares `walk_pages_until` with the full walk, so a
+    /// prefix can never disagree with what `page_ids` would return.
+    pub(crate) fn page_ids_up_to(&self, limit: usize) -> Result<Vec<ObjectId>> {
+        let mut page_ids = Vec::new();
+        self.walk_pages_until(|id| {
+            page_ids.push(id);
+            page_ids.len() < limit
+        })?;
+        Ok(page_ids)
+    }
+
     /// Count leaf `/Page` objects without materializing their ids — an O(1)-memory
     /// walk sharing `walk_pages` with `page_ids`, so a count can never disagree
     /// with the pages `split`/`split-pages` would actually resolve.
@@ -128,6 +142,15 @@ impl<'a> LazyPdf<'a> {
     /// malformed/adversarial trees via cycle detection, a depth cap, and an
     /// object-visit cap.
     fn walk_pages(&self, mut on_page: impl FnMut(ObjectId)) -> Result<()> {
+        self.walk_pages_until(|id| {
+            on_page(id);
+            true
+        })
+    }
+
+    /// Like [`walk_pages`], but `on_page` returns whether to keep walking —
+    /// `false` stops the traversal early (successfully).
+    fn walk_pages_until(&self, mut on_page: impl FnMut(ObjectId) -> bool) -> Result<()> {
         let root_id = self
             .reader
             .document
@@ -180,7 +203,11 @@ impl<'a> LazyPdf<'a> {
             }
 
             match self.classify_page_node(id, &mut current_container)? {
-                PageNode::Leaf => on_page(id),
+                PageNode::Leaf => {
+                    if !on_page(id) {
+                        return Ok(());
+                    }
+                }
                 PageNode::Interior(kids) => {
                     for kid_id in kids.into_iter().rev() {
                         stack.push((kid_id, depth + 1));

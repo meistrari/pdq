@@ -736,14 +736,6 @@ fn is_form_xobject(dict: &Dictionary) -> bool {
     dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
 }
 
-pub(crate) fn copy_pages(
-    source: &impl ObjectSource,
-    target: &mut Document,
-    page_ids: &[ObjectId],
-) -> Result<Vec<ObjectId>> {
-    copy_pages_with_options(source, target, page_ids, CopyOptions::default())
-}
-
 pub(crate) fn copy_pages_with_options(
     source: &impl ObjectSource,
     target: &mut Document,
