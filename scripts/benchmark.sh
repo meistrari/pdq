@@ -61,6 +61,48 @@ hyperfine --warmup "$WARMUP" --runs "$RUNS" --export-json "$BENCH_DIR/json/merge
   -n qpdf "qpdf --empty --remove-unreferenced-resources=no --pages '$BIG_PDF' '$SMALL_PDF' -- '$BENCH_DIR/out/merge-qpdf.pdf'" \
   -n mutool "mutool merge -o '$BENCH_DIR/out/merge-mutool.pdf' '$BIG_PDF' '$SMALL_PDF'"
 
+MEM_RUNS=${BENCH_MEM_RUNS:-3}
+python3 "$ROOT/scripts/measure_mem.py" --runs "$MEM_RUNS" --output "$BENCH_DIR/json/memory.json" <<EOF
+[
+  {"scenario": "split-big", "tool": "pdq",
+   "prepare": "rm -rf '$BENCH_DIR/out/mem-split' && mkdir -p '$BENCH_DIR/out/mem-split'",
+   "cmd": ["$ROOT/target/release/pdq", "split-pages", "--output", "$BENCH_DIR/out/mem-split/page-%d.pdf", "$BIG_PDF"]},
+  {"scenario": "split-big", "tool": "qpdf",
+   "prepare": "rm -rf '$BENCH_DIR/out/mem-split' && mkdir -p '$BENCH_DIR/out/mem-split'",
+   "cmd": ["qpdf", "--remove-unreferenced-resources=no", "--split-pages", "$BIG_PDF", "$BENCH_DIR/out/mem-split/page-%d.pdf"]},
+  {"scenario": "split-small", "tool": "pdq",
+   "prepare": "rm -rf '$BENCH_DIR/out/mem-split' && mkdir -p '$BENCH_DIR/out/mem-split'",
+   "cmd": ["$ROOT/target/release/pdq", "split-pages", "--output", "$BENCH_DIR/out/mem-split/page-%d.pdf", "$SMALL_PDF"]},
+  {"scenario": "rewrite-big", "tool": "pdq",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-rewrite.pdf'",
+   "cmd": ["$ROOT/target/release/pdq", "split", "$BIG_PDF", "--out", "1-z", "$BENCH_DIR/out/mem-rewrite.pdf"]},
+  {"scenario": "rewrite-big", "tool": "qpdf",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-rewrite.pdf'",
+   "cmd": ["qpdf", "--remove-unreferenced-resources=no", "$BIG_PDF", "$BENCH_DIR/out/mem-rewrite.pdf"]},
+  {"scenario": "rewrite-big", "tool": "mutool",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-rewrite.pdf'",
+   "cmd": ["mutool", "clean", "$BIG_PDF", "$BENCH_DIR/out/mem-rewrite.pdf"]},
+  {"scenario": "rewrite-small", "tool": "pdq",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-rewrite.pdf'",
+   "cmd": ["$ROOT/target/release/pdq", "split", "$SMALL_PDF", "--out", "1-z", "$BENCH_DIR/out/mem-rewrite.pdf"]},
+  {"scenario": "rewrite-small", "tool": "qpdf",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-rewrite.pdf'",
+   "cmd": ["qpdf", "--remove-unreferenced-resources=no", "$SMALL_PDF", "$BENCH_DIR/out/mem-rewrite.pdf"]},
+  {"scenario": "rewrite-small", "tool": "mutool",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-rewrite.pdf'",
+   "cmd": ["mutool", "clean", "$SMALL_PDF", "$BENCH_DIR/out/mem-rewrite.pdf"]},
+  {"scenario": "merge", "tool": "pdq",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-merge.pdf'",
+   "cmd": ["$ROOT/target/release/pdq", "merge", "--output", "$BENCH_DIR/out/mem-merge.pdf", "$BIG_PDF", "$SMALL_PDF"]},
+  {"scenario": "merge", "tool": "qpdf",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-merge.pdf'",
+   "cmd": ["qpdf", "--empty", "--remove-unreferenced-resources=no", "--pages", "$BIG_PDF", "$SMALL_PDF", "--", "$BENCH_DIR/out/mem-merge.pdf"]},
+  {"scenario": "merge", "tool": "mutool",
+   "prepare": "rm -f '$BENCH_DIR/out/mem-merge.pdf'",
+   "cmd": ["mutool", "merge", "-o", "$BENCH_DIR/out/mem-merge.pdf", "$BIG_PDF", "$SMALL_PDF"]}
+]
+EOF
+
 cat <<EOF
 Benchmark data written to:
 $BENCH_DIR
