@@ -24,8 +24,6 @@ use lopdf::{
     Dictionary, Document, Object, Stream, StringFormat,
 };
 
-use crate::filter::decode_stream_content;
-
 /// Upper bound on incremental-update sections we are willing to follow.
 const MAX_CHAIN_SECTIONS: usize = 1024;
 /// Maximum nesting depth for trailer-dictionary values.
@@ -283,8 +281,7 @@ fn parse_classic_section(mut lexer: Lexer) -> Option<Section> {
 
 /// Parse an xref STREAM: the indirect object header and its stream dictionary
 /// via the minimal object parser, the raw content via a direct `/Length`,
-/// then decode the `/W`/`/Index` entry rows over `decompressed_content()`
-/// (lopdf handles FlateDecode and DecodeParms/PNG predictors).
+/// then decode the `/W`/`/Index` entry rows over the pdq stream decoder.
 fn parse_stream_section(mut lexer: Lexer) -> Option<Section> {
     lexer.skip_whitespace();
     lexer.parse_unsigned::<u32>()?; // object number
@@ -314,7 +311,8 @@ fn parse_stream_section(mut lexer: Lexer) -> Option<Section> {
     }
 
     let stream = Stream::new(dict, raw_content.to_vec());
-    let content = decode_stream_content(&stream).ok()?;
+    let mut content = crate::filter::decode_stream_content(&stream).ok()?;
+    apply_tiff_predictor_2(&mut content, &stream.dict)?;
     let mut trailer = stream.dict;
 
     let sink = decode_stream_entries(&content, &trailer)?;
@@ -410,9 +408,120 @@ fn decode_stream_entries(content: &[u8], dict: &Dictionary) -> Option<EntrySink>
     Some(sink)
 }
 
+fn apply_tiff_predictor_2(content: &mut [u8], dict: &Dictionary) -> Option<()> {
+    let Some(params) = decode_params_dict(dict) else {
+        return Some(());
+    };
+    let predictor = params
+        .get(b"Predictor")
+        .ok()
+        .and_then(|object| object.as_i64().ok())
+        .unwrap_or(1);
+    if predictor != 2 {
+        return Some(());
+    }
+
+    let colors = decode_param_usize(params, b"Colors", 1)?;
+    let bits = decode_param_usize(params, b"BitsPerComponent", 8)?;
+    let columns = decode_param_usize(params, b"Columns", 1)?;
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+        return None;
+    }
+
+    let samples_per_row = colors.checked_mul(columns)?;
+    let row_bits = samples_per_row.checked_mul(bits)?;
+    let row_bytes = row_bits.checked_add(7)? / 8;
+    if row_bytes == 0 || !content.len().is_multiple_of(row_bytes) {
+        return None;
+    }
+
+    if bits == 8 {
+        for row in content.chunks_exact_mut(row_bytes) {
+            for index in colors..samples_per_row {
+                row[index] = row[index].wrapping_add(row[index - colors]);
+            }
+        }
+        return Some(());
+    }
+
+    let modulus = 1u32.checked_shl(u32::try_from(bits).ok()?)?;
+    let mask = modulus - 1;
+    for row in content.chunks_exact_mut(row_bytes) {
+        for sample in colors..samples_per_row {
+            let residual = read_packed_sample(row, sample, bits);
+            let left = read_packed_sample(row, sample - colors, bits);
+            write_packed_sample(row, sample, bits, (residual + left) & mask);
+        }
+    }
+
+    Some(())
+}
+
+fn decode_params_dict(dict: &Dictionary) -> Option<&Dictionary> {
+    let filter_index = predictor_filter_index(dict).unwrap_or(0);
+    match dict.get(b"DecodeParms").ok()? {
+        Object::Dictionary(params) => Some(params),
+        Object::Array(params) => params
+            .get(filter_index)
+            .and_then(|param| param.as_dict().ok()),
+        _ => None,
+    }
+}
+
+fn predictor_filter_index(dict: &Dictionary) -> Option<usize> {
+    match dict.get(b"Filter").ok()? {
+        Object::Name(name) => predictor_filter_name(name).then_some(0),
+        Object::Array(filters) => filters
+            .iter()
+            .position(|filter| filter.as_name().is_ok_and(predictor_filter_name)),
+        _ => None,
+    }
+}
+
+fn predictor_filter_name(name: &[u8]) -> bool {
+    matches!(
+        crate::filter::canonical_filter_name(name),
+        b"FlateDecode" | b"LZWDecode"
+    )
+}
+
+fn decode_param_usize(params: &Dictionary, key: &[u8], default: usize) -> Option<usize> {
+    match params.get(key).ok().and_then(|object| object.as_i64().ok()) {
+        Some(value) if value > 0 => usize::try_from(value).ok(),
+        Some(_) => None,
+        None => Some(default),
+    }
+}
+
 fn integer_array(object: &Object) -> Option<Vec<i64>> {
     let array = object.as_array().ok()?;
     array.iter().map(|item| item.as_i64().ok()).collect()
+}
+
+fn read_packed_sample(row: &[u8], sample: usize, bits: usize) -> u32 {
+    let bit_offset = sample * bits;
+    let mut value = 0u32;
+    for offset in 0..bits {
+        let bit_index = bit_offset + offset;
+        let byte = row[bit_index / 8];
+        let bit = (byte >> (7 - (bit_index % 8))) & 1;
+        value = (value << 1) | u32::from(bit);
+    }
+    value
+}
+
+fn write_packed_sample(row: &mut [u8], sample: usize, bits: usize, value: u32) {
+    let bit_offset = sample * bits;
+    for offset in 0..bits {
+        let bit_index = bit_offset + offset;
+        let mask = 1u8 << (7 - (bit_index % 8));
+        let bit = (value >> (bits - 1 - offset)) & 1;
+        if bit == 0 {
+            row[bit_index / 8] &= !mask;
+        } else {
+            row[bit_index / 8] |= mask;
+        }
+    }
 }
 
 fn read_big_endian(bytes: &[u8]) -> u64 {
@@ -765,7 +874,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{LoadOptions, Object, ObjectId};
+    use lopdf::{dictionary, LoadOptions, Object, ObjectId};
 
     fn drop_object(_: ObjectId, _: &mut Object) -> Option<(ObjectId, Object)> {
         None
@@ -853,6 +962,68 @@ mod tests {
             !document.trailer.has(b"W") && !document.trailer.has(b"Length"),
             "stream bookkeeping keys must not leak into the trailer"
         );
+    }
+
+    fn tiff_predictor_dict(colors: i64, bits: i64, columns: i64) -> Dictionary {
+        dictionary! {
+            "DecodeParms" => dictionary! {
+                "Predictor" => 2,
+                "Colors" => colors,
+                "BitsPerComponent" => bits,
+                "Columns" => columns,
+            },
+        }
+    }
+
+    #[test]
+    fn tiff_predictor_2_decodes_byte_rows() {
+        // Two RGB-ish pixels. The second pixel stores channel deltas from the
+        // first, so the row reconstructs by adding the sample `Colors` back.
+        let mut data = vec![10, 20, 30, 1, 2, 3];
+        let dict = tiff_predictor_dict(3, 8, 2);
+
+        apply_tiff_predictor_2(&mut data, &dict).expect("predictor should decode");
+
+        assert_eq!(data, vec![10, 20, 30, 11, 22, 33]);
+    }
+
+    #[test]
+    fn tiff_predictor_2_decodes_packed_samples() {
+        // Four 4-bit samples. Encoded deltas [1, 2, 3, 4] reconstruct to
+        // absolute samples [1, 3, 6, 10], packed as 0x13 0x6a.
+        let mut data = vec![0x12, 0x34];
+        let dict = tiff_predictor_dict(1, 4, 4);
+
+        apply_tiff_predictor_2(&mut data, &dict).expect("predictor should decode");
+
+        assert_eq!(data, vec![0x13, 0x6a]);
+    }
+
+    #[test]
+    fn tiff_predictor_2_uses_decode_params_for_matching_filter() {
+        let mut data = vec![10, 1, 1, 1, 20, 2, 2, 2];
+        let dict = dictionary! {
+            "Filter" => Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"FlateDecode".to_vec()),
+            ]),
+            "DecodeParms" => Object::Array(vec![
+                dictionary! {
+                    "Predictor" => 1,
+                    "Columns" => 8,
+                }.into(),
+                dictionary! {
+                    "Predictor" => 2,
+                    "Colors" => 1,
+                    "BitsPerComponent" => 8,
+                    "Columns" => 4,
+                }.into(),
+            ]),
+        };
+
+        apply_tiff_predictor_2(&mut data, &dict).expect("predictor should decode");
+
+        assert_eq!(data, vec![10, 11, 12, 13, 20, 22, 24, 26]);
     }
 
     #[test]
