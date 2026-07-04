@@ -2,23 +2,34 @@
 # Populate corpus/ with real PDFs for tests/corpus.rs.
 #
 # Usage:
+#   scripts/fetch_corpus.sh --fixtures    # generate the anonymized benchmark PDFs (12,732p + 2,642p)
 #   scripts/fetch_corpus.sh --local DIR   # symlink every PDF under DIR
 #   scripts/fetch_corpus.sh --qpdf        # qpdf's qtest suite (~hundreds, many intentionally weird)
 #   scripts/fetch_corpus.sh --pdfjs       # Mozilla pdf.js test corpus (real-world PDFs)
 #
 # Flags can be combined. The corpus lives in corpus/ (gitignored); local
 # files are symlinked, so nothing is duplicated or leaves the machine.
+# --fixtures needs only python3: the generator is seeded and reproducible,
+# rebuilding faithful anonymized replicas of the benchmark corpus anywhere.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p corpus
 
 if [ $# -eq 0 ]; then
-    grep '^#' "$0" | head -12
+    grep '^#' "$0" | head -14
     exit 1
 fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
+    --fixtures)
+        shift
+        mkdir -p corpus/generated
+        python3 scripts/make_fixtures.py \
+            corpus/generated/anon-pje-like-12732p.pdf \
+            corpus/generated/anon-trf4-like-2642p.pdf
+        echo "fixtures: generated 2 anonymized benchmark PDFs into corpus/generated"
+        ;;
     --local)
         src="${2:?--local needs a directory}"
         shift 2

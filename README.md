@@ -72,9 +72,15 @@ split/merge behavior on them, including resource-pruning regression guards.
 ground truth, classifying each file (pass / note / skip / warn / fail):
 
 ```sh
-scripts/fetch_corpus.sh --local ~/Downloads --qpdf --pdfjs
+scripts/fetch_corpus.sh --fixtures --qpdf --pdfjs   # reproducible anywhere
+scripts/fetch_corpus.sh --local ~/Downloads          # plus your own PDFs
 cargo test --release --test corpus -- --ignored --nocapture
 ```
+
+No PDFs are versioned: `--qpdf`/`--pdfjs` fetch the public test corpora from
+their upstream repositories, and `--fixtures` regenerates the anonymized
+benchmark replicas (12,732 and 2,642 pages) from the seeded generator in
+`scripts/make_fixtures.py` — private documents stay strictly local.
 
 The corpus lives in `corpus/` (gitignored; local files are symlinked). Use
 `PDQ_CORPUS_DIR` to point elsewhere, `PDQ_CORPUS_MAX_FILES` to cap a run, and
