@@ -11,6 +11,7 @@ use lopdf::{dictionary, Dictionary, Object, ObjectId, StringFormat};
 
 use crate::{
     copy::{CopyOptions, ObjectSource},
+    lazy::inferred_page_leaf,
     PdfOpsError, Result,
 };
 
@@ -146,10 +147,41 @@ impl<'a> StreamingCopyContext<'a> {
         let new_id = if self.selected_pages.contains(&page_id) {
             self.copy_page_instance(source, page_id)?
         } else {
-            let new_id = self.copy_object_at_depth(source, page_id, 0)?;
+            let new_id = self.copy_first_page_instance(source, page_id)?;
             self.selected_pages.insert(page_id);
             new_id
         };
+        Ok(new_id)
+    }
+
+    fn copy_first_page_instance(
+        &mut self,
+        source: &impl ObjectSource,
+        old_page_id: ObjectId,
+    ) -> Result<ObjectId> {
+        let object = source
+            .get_object_value(old_page_id)
+            .map_err(PdfOpsError::Pdf)?;
+        let page = object
+            .as_dict()
+            .map_err(|_| PdfOpsError::InvalidStructure("page is not a dictionary".into()))?;
+        if !inferred_page_leaf(page) {
+            return Err(PdfOpsError::InvalidStructure(
+                "copied page does not have /Type /Page".into(),
+            ));
+        }
+
+        let new_id = self.writer.new_object_id();
+        let previous = self.object_map.insert(old_page_id, new_id);
+        let copied = match self.copy_page_dictionary(source, old_page_id, page, 0) {
+            Ok(copied) => copied,
+            Err(err) => {
+                restore_object_mapping(&mut self.object_map, old_page_id, previous);
+                return Err(err);
+            }
+        };
+        self.writer
+            .write_object(new_id, &Object::Dictionary(copied))?;
         Ok(new_id)
     }
 
@@ -164,7 +196,7 @@ impl<'a> StreamingCopyContext<'a> {
         let page = object
             .as_dict()
             .map_err(|_| PdfOpsError::InvalidStructure("page is not a dictionary".into()))?;
-        if !page.has_type(b"Page") {
+        if !inferred_page_leaf(page) {
             return Err(PdfOpsError::InvalidStructure(
                 "copied page does not have /Type /Page".into(),
             ));
@@ -260,6 +292,7 @@ impl<'a> StreamingCopyContext<'a> {
             }
         }
         copied.set("Parent", self.writer.pages_id());
+        copied.set("Type", "Page");
 
         Ok(copied)
     }

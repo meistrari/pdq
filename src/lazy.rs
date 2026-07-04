@@ -351,7 +351,6 @@ impl<'a> LazyPdf<'a> {
                         stack.push((kid_id, depth + 1));
                     }
                 }
-                PageNode::Other => {}
             }
         }
 
@@ -383,7 +382,7 @@ impl<'a> LazyPdf<'a> {
             let object = objects
                 .get(&(id.0, 0))
                 .ok_or(PdfOpsError::Pdf(lopdf::Error::ObjectNotFound(id)))?;
-            return classify_page_dict(object);
+            return classify_page_dict(id, object);
         }
 
         let mut already_seen = HashSet::new();
@@ -391,7 +390,7 @@ impl<'a> LazyPdf<'a> {
             .reader
             .get_object(id, &mut already_seen)
             .map_err(|err| PdfOpsError::Pdf(normalize_missing_xref(err, id)))?;
-        classify_page_dict(&object)
+        classify_page_dict(id, &object)
     }
 
     fn get_owned(&self, id: ObjectId) -> Result<Object> {
@@ -472,42 +471,75 @@ impl ObjectSource for LazyPdf<'_> {
 enum PageNode {
     Leaf,
     Interior(Vec<ObjectId>),
-    Other,
 }
 
-fn classify_page_dict(object: &Object) -> Result<PageNode> {
-    let dict = object
-        .as_dict()
-        .map_err(|_| PdfOpsError::InvalidStructure("page tree node is not a dictionary".into()))?;
-    match dict.get_type().map_err(PdfOpsError::Pdf)? {
-        b"Page" => Ok(PageNode::Leaf),
-        b"Pages" => {
-            let kids = dict
-                .get(b"Kids")
-                .and_then(Object::as_array)
-                .map_err(PdfOpsError::Pdf)?;
-            let mut kid_ids = Vec::with_capacity(kids.len());
-            for kid in kids {
-                match kid {
-                    Object::Reference(kid_id) => kid_ids.push(*kid_id),
-                    // A direct page dict has no object id, so split could
-                    // never copy it; refuse loudly instead of silently
-                    // under-counting (qpdf-qtest 0213).
-                    Object::Dictionary(_) => {
-                        return Err(PdfOpsError::InvalidStructure(
-                            "page tree kid is a direct object; pages must be \
-                             indirect references"
-                                .into(),
-                        ));
-                    }
-                    // tolerate nulls and other junk in Kids arrays
-                    _ => {}
-                }
-            }
-            Ok(PageNode::Interior(kid_ids))
-        }
-        _ => Ok(PageNode::Other),
+enum PageNodeKind {
+    Leaf,
+    Interior,
+}
+
+fn classify_page_dict(id: ObjectId, object: &Object) -> Result<PageNode> {
+    let dict = object.as_dict().map_err(|_| {
+        PdfOpsError::InvalidStructure(format!(
+            "page tree node {} {} R is not a dictionary",
+            id.0, id.1
+        ))
+    })?;
+
+    match page_node_kind(dict) {
+        PageNodeKind::Leaf => Ok(PageNode::Leaf),
+        PageNodeKind::Interior => classify_page_tree_interior(id, dict),
     }
+}
+
+fn page_node_kind(dict: &Dictionary) -> PageNodeKind {
+    match dict.get(b"Type") {
+        Ok(Object::Name(name)) if name == b"Page" => PageNodeKind::Leaf,
+        Ok(Object::Name(name)) if name == b"Pages" => PageNodeKind::Interior,
+        _ if dict.has(b"Kids") => PageNodeKind::Interior,
+        _ => PageNodeKind::Leaf,
+    }
+}
+
+pub(crate) fn inferred_page_leaf(dict: &Dictionary) -> bool {
+    matches!(page_node_kind(dict), PageNodeKind::Leaf)
+}
+
+fn classify_page_tree_interior(id: ObjectId, dict: &Dictionary) -> Result<PageNode> {
+    let kids = match dict.get(b"Kids") {
+        Ok(Object::Array(kids)) => kids,
+        Ok(other) => {
+            return Err(PdfOpsError::InvalidStructure(format!(
+                "page tree node {} {} R has /Kids as {}, expected array",
+                id.0,
+                id.1,
+                other.enum_variant()
+            )));
+        }
+        Err(_) => {
+            return Err(PdfOpsError::InvalidStructure(format!(
+                "page tree node {} {} R is an interior page-tree node but is missing /Kids",
+                id.0, id.1
+            )));
+        }
+    };
+
+    let mut kid_ids = Vec::with_capacity(kids.len());
+    for (index, kid) in kids.iter().enumerate() {
+        match kid {
+            Object::Reference(kid_id) => kid_ids.push(*kid_id),
+            other => {
+                return Err(PdfOpsError::InvalidStructure(format!(
+                    "page tree node {} {} R has direct/non-reference /Kids[{index}] as {}; \
+                     page tree kids must be indirect references",
+                    id.0,
+                    id.1,
+                    other.enum_variant()
+                )));
+            }
+        }
+    }
+    Ok(PageNode::Interior(kid_ids))
 }
 
 fn drop_object(_: ObjectId, _: &mut Object) -> Option<(ObjectId, Object)> {

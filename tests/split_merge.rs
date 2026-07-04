@@ -337,6 +337,129 @@ fn page_count_fast_trusts_plausible_count_by_design() {
 }
 
 #[test]
+fn page_count_infers_missing_or_bogus_page_tree_types() {
+    let temp = tempdir().unwrap();
+    let cases = [
+        ("missing-interior", None, Some(b"Page".as_ref())),
+        (
+            "bogus-interior",
+            Some(b"Pagez".as_ref()),
+            Some(b"Page".as_ref()),
+        ),
+        ("missing-leaf", Some(b"Pages".as_ref()), None),
+        (
+            "bogus-leaf",
+            Some(b"Pages".as_ref()),
+            Some(b"Pagez".as_ref()),
+        ),
+        ("missing-both", None, None),
+        (
+            "bogus-both",
+            Some(b"Pagez".as_ref()),
+            Some(b"Pagez".as_ref()),
+        ),
+    ];
+
+    for (label, pages_type, page_type) in cases {
+        let input = temp.path().join(format!("{label}.pdf"));
+        write_page_tree_type_inference_pdf(&input, pages_type, page_type);
+        assert_eq!(
+            page_count(&input).unwrap(),
+            1,
+            "strict walk should infer page-tree node kind for {label}"
+        );
+    }
+}
+
+#[test]
+fn split_normalizes_inferred_page_tree_leaf_types() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("missing-leaf-type.pdf");
+    let split_output = temp.path().join("split.pdf");
+    let split_pages_pattern = temp.path().join("page-%d.pdf");
+
+    write_page_tree_type_inference_pdf(&input, Some(b"Pages"), None);
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1").unwrap(),
+            path: split_output.clone(),
+        }],
+    )
+    .unwrap();
+    split_pages(&input, split_pages_pattern.to_str().unwrap()).unwrap();
+
+    let split_page_output = temp.path().join("page-1.pdf");
+    assert_written(&split_output);
+    assert_written(&split_page_output);
+
+    let qpdf = QpdfValidator::detect();
+    qpdf.validate(&split_output, 1);
+    qpdf.validate(&split_page_output, 1);
+
+    for output in [&split_output, &split_page_output] {
+        let document = Document::load(output)
+            .unwrap_or_else(|err| panic!("failed to load {}: {err}", output.display()));
+        let page_id = document.get_pages()[&1];
+        let page = document
+            .get_object(page_id)
+            .unwrap()
+            .as_dict()
+            .unwrap_or_else(|_| {
+                panic!("page object should be a dictionary in {}", output.display())
+            });
+        assert!(
+            page.has_type(b"Page"),
+            "{} should write /Type /Page",
+            output.display()
+        );
+    }
+}
+
+#[test]
+#[ignore = "external qpdf fixture is not checked into the repository"]
+fn page_count_reads_no_pages_types_fixture_when_available() {
+    let input = fixture("no-pages-types.pdf");
+    if !input.exists() {
+        eprintln!("no-pages-types.pdf fixture unavailable; skipping qpdf fixture regression");
+        return;
+    }
+
+    assert_eq!(page_count(&input).unwrap(), 1);
+}
+
+#[test]
+fn page_count_reports_clear_error_for_unwalkable_inferred_interior() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("bad-kids-type.pdf");
+    write_page_tree_with_bad_kids(&input, Object::Name(b"not-an-array".to_vec()));
+
+    let err = page_count(&input).unwrap_err().to_string();
+    assert!(
+        err.contains("2 0 R") && err.contains("/Kids") && err.contains("expected array"),
+        "expected a contextual /Kids error, got: {err}"
+    );
+    assert!(
+        !err.contains("Linearized"),
+        "page tree errors should not leak lopdf's get_type fallback: {err}"
+    );
+}
+
+#[test]
+fn page_count_rejects_non_reference_page_tree_kids() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("null-page-tree-kid.pdf");
+    write_page_tree_with_bad_kids(&input, Object::Array(vec![Object::Null]));
+
+    let err = page_count(&input).unwrap_err().to_string();
+    assert!(
+        err.contains("2 0 R") && err.contains("/Kids[0]") && err.contains("indirect references"),
+        "expected a contextual non-reference kid error, got: {err}"
+    );
+}
+
+#[test]
 fn page_count_encrypted_inputs_behave_the_same_in_both_modes() {
     // A real user password is required: without it both modes fail with the
     // password error, never a wrong count.
@@ -1290,6 +1413,78 @@ fn write_three_page_pdf_with_count(path: &Path, count: Option<Object>) {
     document
         .save(path)
         .unwrap_or_else(|err| panic!("failed to save page-count fixture: {err}"));
+}
+
+fn write_page_tree_type_inference_pdf(
+    path: &Path,
+    pages_type: Option<&[u8]>,
+    page_type: Option<&[u8]>,
+) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let page_id = document.new_object_id();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+
+    let mut pages = Dictionary::new();
+    set_optional_type(&mut pages, pages_type);
+    pages.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
+    pages.set("Count", 1);
+    document.objects.insert(pages_id, Object::Dictionary(pages));
+
+    let mut page = Dictionary::new();
+    set_optional_type(&mut page, page_type);
+    page.set("Parent", pages_id);
+    page.set(
+        "MediaBox",
+        Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+    );
+    page.set("Resources", Dictionary::new());
+    document.objects.insert(page_id, Object::Dictionary(page));
+
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save page-tree type fixture: {err}"));
+}
+
+fn set_optional_type(dict: &mut Dictionary, type_name: Option<&[u8]>) {
+    if let Some(type_name) = type_name {
+        dict.set("Type", Object::Name(type_name.to_vec()));
+    }
+}
+
+fn write_page_tree_with_bad_kids(path: &Path, kids: Object) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+
+    let mut pages = Dictionary::new();
+    pages.set("Kids", kids);
+    pages.set("Count", 1);
+    document.objects.insert(pages_id, Object::Dictionary(pages));
+
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save bad page-tree fixture: {err}"));
 }
 
 fn write_simple_pdf(path: &Path, page_count: usize) {
