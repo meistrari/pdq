@@ -263,6 +263,45 @@ it was not penalized for its slow default.
   rewrite of the 200 MB file peaks at ~43 MB of heap — and a single-input
   merge of a healthy file is a plain byte copy.
 
+### On a constrained server
+
+Sustained throughput in a Linux container capped at **4 GB RAM / 2 vCPU**
+(no swap), 45 s windows per cell, OOM kills counted as failures.
+
+Continuous whole-document rewrites of the 200 MB / 12,732-page file, in
+ops/min by worker count:
+
+| workers | pdq | qpdf | MuPDF |
+| --- | ---: | ---: | ---: |
+| 2 | 239 | 115 | **297** |
+| 4 | 216 | 73 | **236** |
+| 8 | **134** | 60 | 123 |
+
+Mixed traffic (weighted mix per worker: 55 KB / 3.5 MB / 26 MB / 200 MB
+rewrites, 100-page extracts, merges, and damaged-xref repairs):
+
+| workers | pdq | qpdf |
+| --- | ---: | ---: |
+| 2 | **2,120** | 532 |
+| 4 | **1,945** | 494 |
+| 8 | **1,289** | 391 |
+
+Zero failures in every cell above. For contrast, pdq's previous eager
+rewrite path OOM-killed 40% of requests at 8 concurrent big-file rewrites
+in the same container — the streaming rewrite is what makes the worst
+case degrade gracefully (CPU queuing) instead of dying. Damaged inputs
+stay cheap under load: xref reconstruction plus rewrite of a 3.5 MB file
+holds ~20 ms p50 at 8 workers.
+
+Reproduce with `scripts/throughput_bench.py` (single-command or `--mix`
+weighted-traffic mode) inside any memory/CPU-capped container:
+
+```sh
+docker run --memory=4g --memory-swap=4g --cpus=2 ... \
+  python3 throughput_bench.py --duration 45 --concurrency 4 \
+  -- pdq split big.pdf --out 1-z {out}
+```
+
 ### Reproducing
 
 The benchmark PDFs contain personal data and stay outside the repo, but

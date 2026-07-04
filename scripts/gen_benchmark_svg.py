@@ -55,7 +55,10 @@ PANELS = [
 ]
 
 HEADER_H = 96
-FOOTER_H = 104
+FOOTER_H = 126
+FOOT_NOTE = ("Constrained server (4 GB &#183; 2 vCPU container): pdq sustains "
+             "2,120 mixed ops/min &#183; qpdf 532 &#183; zero OOM kills &#183; "
+             "scripts/throughput_bench.py")
 
 def panel_height(p):
     return PANEL_TITLE_H + len(p["rows"]) * ROW_PITCH
@@ -176,6 +179,7 @@ for ci, (label, lines) in enumerate(FOOT_COLS):
                f'letter-spacing="0.9" style="text-transform:uppercase">{label.upper()}</text>')
     for li, line in enumerate(lines):
         out.append(f'<text class="ink2" x="{cx:.0f}" y="{fy + 44 + li * 17}" font-size="11">{line}</text>')
+out.append(f'<text class="muted" x="{PAD}" y="{fy + 88}" font-size="11">{FOOT_NOTE}</text>')
 out.append('</svg>')
 
 svg = "\n".join(out)
