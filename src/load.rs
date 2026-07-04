@@ -7,6 +7,10 @@ use crate::{range::PageRangeError, PdfOpsError, Result};
 
 /// Load a whole document eagerly, transparently decrypting encrypted inputs.
 ///
+/// Still the right source for whole-document copies: objects are parsed once
+/// (in parallel) and then borrowed during the copy, which beats per-object
+/// lazy fetches when the copy will touch every object anyway.
+///
 /// lopdf authenticates encrypted PDFs during the load: the empty user
 /// password is tried first (covering the common owner-password-only files),
 /// then `password` when provided. On success every object is decrypted in

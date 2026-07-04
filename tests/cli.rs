@@ -316,6 +316,55 @@ fn split_pages_cli_rejects_pattern_with_multiple_placeholders() {
 }
 
 #[test]
+fn page_count_cli_strict_flag_reports_total_pages() {
+    for input in ["11-pages.pdf", "11-pages-objstm.pdf"] {
+        pdq()
+            .arg("page-count")
+            .arg("--strict")
+            .arg(fixture(input))
+            .assert()
+            .success()
+            .stdout(predicate::str::diff("11\n"));
+        // Default (trusted /Count) mode must agree with --strict.
+        pdq()
+            .arg("page-count")
+            .arg(fixture(input))
+            .assert()
+            .success()
+            .stdout(predicate::str::diff("11\n"));
+    }
+}
+
+#[test]
+fn page_count_cli_encrypted_inputs_behave_the_same_in_both_modes() {
+    for strict in [false, true] {
+        // A real user password is required: without it both modes must fail
+        // with the password guidance, never a wrong count.
+        let mut cmd = pdq();
+        cmd.arg("page-count");
+        if strict {
+            cmd.arg("--strict");
+        }
+        cmd.arg(fixture("user-password.pdf"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("password"));
+
+        // Owner-password-only files decrypt with the empty user password and
+        // must count identically in fast and strict modes.
+        let mut cmd = pdq();
+        cmd.arg("page-count");
+        if strict {
+            cmd.arg("--strict");
+        }
+        cmd.arg(fixture("owner-only.pdf"))
+            .assert()
+            .success()
+            .stdout(predicate::str::diff("11\n"));
+    }
+}
+
+#[test]
 fn split_pages_cli_chunks_pages_per_file() {
     let temp = tempdir().unwrap();
 

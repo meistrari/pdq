@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-seuop
+set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIG_PDF=${PDQ_BIG_PDF:?set PDQ_BIG_PDF to the 12,732-page benchmark PDF}

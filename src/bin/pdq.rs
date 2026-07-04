@@ -2,8 +2,9 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
-    merge_with_options, page_count_with_password, split_pages_with_options, split_with_password,
-    MergeInput, MergeOptions, PageRangeGroup, SplitOutput, SplitPagesOptions,
+    merge_with_options, page_count_fast_with_password, page_count_with_password,
+    split_pages_with_options, split_with_password, MergeInput, MergeOptions, PageRangeGroup,
+    SplitOutput, SplitPagesOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -19,6 +20,7 @@ enum Command {
     Split(SplitArgs),
     SplitPages(SplitPagesArgs),
     Merge(MergeArgs),
+    /// Print the number of pages (trusts the root /Count like qpdf; --strict walks the page tree)
     PageCount(PageCountArgs),
     #[cfg(feature = "render")]
     Render(RenderArgs),
@@ -73,6 +75,12 @@ struct SplitPagesArgs {
 #[derive(Debug, Args)]
 struct PageCountArgs {
     input: PathBuf,
+
+    /// Validate the count by walking every page-tree node instead of trusting
+    /// the root /Count (slower, but immune to lying metadata; a missing or
+    /// implausible /Count already falls back to this walk automatically)
+    #[arg(long)]
+    strict: bool,
 
     /// Password for encrypted inputs
     #[arg(long, value_name = "PASSWORD")]
@@ -130,7 +138,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
         Command::PageCount(args) => {
-            let count = page_count_with_password(&args.input, args.password.as_deref())?;
+            let count = if args.strict {
+                page_count_with_password(&args.input, args.password.as_deref())?
+            } else {
+                page_count_fast_with_password(&args.input, args.password.as_deref())?
+            };
             println!("{count}");
         }
         #[cfg(feature = "render")]

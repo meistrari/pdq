@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{lazy::PdfSource, load::map_file, Result};
 
-/// Count the pages in a PDF.
+/// Count the pages in a PDF by walking the page tree (validated count).
 ///
 /// Uses the same lazy, mmap-backed reader as `split-pages` and counts via the
 /// shared page-tree walk (`count_pages`), so it stays cheap on very large
@@ -19,7 +19,45 @@ pub fn page_count(input: &Path) -> Result<usize> {
 /// Like [`page_count`], additionally decrypting encrypted inputs with
 /// `password` when the empty user password does not authenticate.
 pub fn page_count_with_password(input: &Path, password: Option<&str>) -> Result<usize> {
+    count_impl(input, password, true)
+}
+
+/// Count the pages in a PDF by trusting the root `/Pages` `/Count` (fast count).
+///
+/// Market semantics, matching `qpdf --show-npages` and lopdf's metadata load:
+/// the trailer `/Root` is resolved to the catalog, its `/Pages` node is read,
+/// and a plausible `/Count` is returned as-is — the page tree is NOT walked,
+/// so a lying-but-plausible `/Count` is trusted. When `/Count` is missing, not
+/// a direct non-negative integer, or larger than the xref size, this falls
+/// back to the validated walk ([`page_count`]) and still returns the true
+/// count. Encryption is handled exactly as in [`page_count`].
+pub fn page_count_fast(input: &Path) -> Result<usize> {
+    page_count_fast_with_password(input, None)
+}
+
+/// Like [`page_count_fast`], additionally decrypting encrypted inputs with
+/// `password` when the empty user password does not authenticate.
+pub fn page_count_fast_with_password(input: &Path, password: Option<&str>) -> Result<usize> {
+    count_impl(input, password, false)
+}
+
+fn count_impl(input: &Path, password: Option<&str>, strict: bool) -> Result<usize> {
+    let timing = std::env::var_os("PDQ_TIMING").is_some();
+    let start = std::time::Instant::now();
     let mmap = map_file(input)?;
     let source = PdfSource::open(&mmap, input, password)?;
-    source.count_pages()
+    if timing {
+        eprintln!("phase parse: {:?}", start.elapsed());
+    }
+    let count_start = std::time::Instant::now();
+    let count = if strict {
+        source.count_pages()
+    } else {
+        source.count_pages_fast()
+    };
+    if timing {
+        let phase = if strict { "walk" } else { "count" };
+        eprintln!("phase {phase}: {:?}", count_start.elapsed());
+    }
+    count
 }

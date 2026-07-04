@@ -27,6 +27,29 @@ impl PageRangeGroup {
         &self.raw
     }
 
+    /// Highest page number this group can reference, or `None` when any
+    /// endpoint depends on the document's total page count (`z` or a reverse
+    /// `rN` endpoint). Callers can use a `Some` bound to stop resolving pages
+    /// early; `None` means the whole document must be enumerated.
+    pub fn bounded_max_page(&self) -> Option<usize> {
+        let mut max = 0usize;
+        for part in self.raw.split(',') {
+            let part = part.trim();
+            let endpoints: [&str; 2] = match part.split_once('-') {
+                Some((start, end)) => [start, end],
+                None => [part, part],
+            };
+            for endpoint in endpoints {
+                let endpoint = endpoint.trim();
+                if endpoint == "z" || endpoint.starts_with('r') {
+                    return None;
+                }
+                max = max.max(parse_positive(endpoint).ok()?);
+            }
+        }
+        Some(max)
+    }
+
     pub fn resolve(&self, page_count: usize) -> Result<Vec<usize>, PageRangeError> {
         if page_count == 0 {
             return Err(PageRangeError::NoPages);
@@ -186,6 +209,38 @@ mod tests {
         let group = PageRangeGroup::parse("1-3,5").unwrap();
 
         assert_eq!(group.resolve(6).unwrap(), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn bounded_max_page_reports_numeric_endpoints() {
+        assert_eq!(
+            PageRangeGroup::parse("5000-5100")
+                .unwrap()
+                .bounded_max_page(),
+            Some(5100)
+        );
+        assert_eq!(
+            PageRangeGroup::parse("1,3,9-7").unwrap().bounded_max_page(),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn bounded_max_page_is_none_for_document_relative_endpoints() {
+        assert_eq!(
+            PageRangeGroup::parse("1-z").unwrap().bounded_max_page(),
+            None
+        );
+        assert_eq!(
+            PageRangeGroup::parse("r2").unwrap().bounded_max_page(),
+            None
+        );
+        assert_eq!(
+            PageRangeGroup::parse("1-3,r1-z")
+                .unwrap()
+                .bounded_max_page(),
+            None
+        );
     }
 
     #[test]

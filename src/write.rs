@@ -494,7 +494,7 @@ fn check_copy_depth(depth: usize) -> Result<()> {
     Ok(())
 }
 
-fn write_object(output: &mut dyn Write, object: &Object) -> std::io::Result<()> {
+pub(crate) fn write_object(output: &mut dyn Write, object: &Object) -> std::io::Result<()> {
     match object {
         Object::Null => output.write_all(b"null"),
         Object::Boolean(value) => {
@@ -566,7 +566,10 @@ fn write_array(output: &mut dyn Write, items: &[Object]) -> std::io::Result<()> 
     output.write_all(b"]")
 }
 
-fn write_dictionary(output: &mut dyn Write, dictionary: &Dictionary) -> std::io::Result<()> {
+pub(crate) fn write_dictionary(
+    output: &mut dyn Write,
+    dictionary: &Dictionary,
+) -> std::io::Result<()> {
     output.write_all(b"<<")?;
     for (key, value) in dictionary {
         write_name(output, key)?;
