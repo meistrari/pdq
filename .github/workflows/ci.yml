@@ -27,6 +27,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Check without default features
+        run: cargo check --no-default-features --all-targets
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

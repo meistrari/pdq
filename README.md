@@ -20,9 +20,14 @@ out of scope for the current MVP.
 cargo test
 cargo run --bin pdq -- split input.pdf --out 1-3 out-1.pdf --out 4-z out-2.pdf
 cargo run --bin pdq -- split-pages --output 'page-%d.pdf' input.pdf
+cargo run --bin pdq -- split-pages --output 'chunk-%d.pdf' --pages-per-file 3 input.pdf
 cargo run --bin pdq -- merge --output merged.pdf a.pdf b.pdf
 cargo run --bin pdq -- page-count input.pdf
 ```
+
+`split-pages --pages-per-file N` groups consecutive pages into files of at most
+N pages each (`%d` is the 1-based chunk index; the last chunk may contain fewer
+pages). The default of 1 writes one page per file.
 
 `page-count` prints the number of pages to stdout. By default it trusts the
 root `/Pages` `/Count` — the same semantics as `qpdf --show-npages` — and
@@ -33,6 +38,15 @@ would resolve and is immune to lying metadata.
 
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.
+
+## Render
+
+`pdq render` rasterizes pages to PNG through [hayro](https://github.com/LaurenzV/hayro),
+a pure-Rust PDF renderer, so the qpdf-free and FFI-free constraints still hold.
+Pages render in parallel and `%d` in the output pattern receives the original,
+zero-padded page number. The command lives behind the `render` cargo feature,
+which is enabled by default; build with `--no-default-features` for a smaller
+split/merge-only binary. Rendering requires Rust 1.92 or newer.
 
 ## Benchmarks
 

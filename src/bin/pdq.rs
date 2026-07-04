@@ -2,8 +2,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
-    merge_with_options, page_count, page_count_fast, split, split_pages, MergeInput, MergeOptions,
-    PageRangeGroup, SplitOutput,
+    merge_with_options, page_count, page_count_fast, split, split_pages_with_options, MergeInput,
+    MergeOptions, PageRangeGroup, SplitOutput, SplitPagesOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -21,6 +21,8 @@ enum Command {
     Merge(MergeArgs),
     /// Print the number of pages (trusts the root /Count like qpdf; --strict walks the page tree)
     PageCount(PageCountArgs),
+    #[cfg(feature = "render")]
+    Render(RenderArgs),
 }
 
 #[derive(Debug, Args)]
@@ -46,6 +48,15 @@ struct SplitPagesArgs {
 
     #[arg(short, long, value_name = "PATTERN")]
     output: String,
+
+    /// Maximum number of pages per output file (%d becomes the chunk index)
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pages_per_file: u64,
 }
 
 #[derive(Debug, Args)]
@@ -57,6 +68,21 @@ struct PageCountArgs {
     /// implausible /Count already falls back to this walk automatically)
     #[arg(long)]
     strict: bool,
+}
+
+#[cfg(feature = "render")]
+#[derive(Debug, Args)]
+struct RenderArgs {
+    input: PathBuf,
+
+    #[arg(short, long, value_name = "PATTERN")]
+    output: String,
+
+    #[arg(long, default_value_t = 150.0)]
+    dpi: f32,
+
+    #[arg(long, value_name = "RANGES")]
+    pages: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -74,7 +100,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             split(&args.input, &outputs)?;
         }
         Command::SplitPages(args) => {
-            split_pages(&args.input, &args.output)?;
+            split_pages_with_options(
+                &args.input,
+                &args.output,
+                &SplitPagesOptions {
+                    pages_per_file: args.pages_per_file as usize,
+                },
+            )?;
         }
         Command::Merge(args) => {
             let inputs = parse_merge_inputs(args.inputs);
@@ -93,6 +125,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 page_count_fast(&args.input)?
             };
             println!("{count}");
+        }
+        #[cfg(feature = "render")]
+        Command::Render(args) => {
+            let options = pdq::RenderOptions {
+                dpi: args.dpi,
+                pages: args.pages.map(PageRangeGroup::parse).transpose()?,
+            };
+            pdq::render_pages(&args.input, &args.output, &options)?;
         }
     }
     Ok(())

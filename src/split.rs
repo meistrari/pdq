@@ -87,8 +87,33 @@ fn resolve_split_outputs(
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct SplitPagesOptions {
+    /// Maximum number of consecutive pages written to each output file.
+    pub pages_per_file: usize,
+}
+
+impl Default for SplitPagesOptions {
+    fn default() -> Self {
+        Self { pages_per_file: 1 }
+    }
+}
+
 pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
+    split_pages_with_options(input, output_pattern, &SplitPagesOptions::default())
+}
+
+pub fn split_pages_with_options(
+    input: &Path,
+    output_pattern: &str,
+    options: &SplitPagesOptions,
+) -> Result<()> {
     validate_output_pattern(output_pattern)?;
+    if options.pages_per_file == 0 {
+        return Err(PdfOpsError::InvalidStructure(
+            "pages-per-file must be at least 1".into(),
+        ));
+    }
 
     let mmap = map_file(input)?;
     let source = LazyPdf::parse(&mmap, input)?;
@@ -97,13 +122,15 @@ pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
     if page_count == 0 {
         return Err(PdfOpsError::Range(PageRangeError::NoPages));
     }
-    let width = page_count.to_string().len();
-    let resolved_outputs = (1..=page_count)
-        .zip(&pages)
-        .map(|(page_number, page_id)| {
+    let chunk_count = page_count.div_ceil(options.pages_per_file);
+    let width = chunk_count.to_string().len();
+    let resolved_outputs = pages
+        .chunks(options.pages_per_file)
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
             Ok(ResolvedSplitOutput {
-                path: render_output_pattern(output_pattern, page_number, width)?,
-                page_ids: vec![*page_id],
+                path: render_output_pattern(output_pattern, chunk_index + 1, width)?,
+                page_ids: chunk.to_vec(),
                 // split-pages always prunes: emitting page subsets is its
                 // whole purpose, and pruning single-page outputs (including
                 // the one-page-document edge) is long-standing behavior.
@@ -112,11 +139,15 @@ pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Fast path: serialize the objects shared by every page once, then emit
-    // only page-specific objects per output. Falls back to the generic
-    // per-output Document path whenever the template cannot be prepared.
-    if let Some(template) = SinglePageTemplate::prepare(&source, &pages) {
-        return run_template_outputs(&source, &template, &resolved_outputs);
+    // Fast path (single-page outputs only — the template writer emits exactly
+    // one page per file): serialize the objects shared by every page once,
+    // then emit only page-specific objects per output. Falls back to the
+    // generic per-output Document path whenever the template cannot be
+    // prepared.
+    if options.pages_per_file == 1 {
+        if let Some(template) = SinglePageTemplate::prepare(&source, &pages) {
+            return run_template_outputs(&source, &template, &resolved_outputs);
+        }
     }
 
     run_split_outputs(&source, &resolved_outputs)
@@ -202,16 +233,20 @@ fn reject_duplicate_output_paths(outputs: &[ResolvedSplitOutput]) -> Result<()> 
     Ok(())
 }
 
-fn render_output_pattern(pattern: &str, page_number: usize, width: usize) -> Result<PathBuf> {
+pub(crate) fn render_output_pattern(
+    pattern: &str,
+    page_number: usize,
+    width: usize,
+) -> Result<PathBuf> {
     let page = format!("{page_number:0width$}");
     Ok(PathBuf::from(pattern.replacen("%d", &page, 1)))
 }
 
-fn validate_output_pattern(pattern: &str) -> Result<()> {
+pub(crate) fn validate_output_pattern(pattern: &str) -> Result<()> {
     let occurrences = pattern.match_indices("%d").count();
     if occurrences != 1 {
         return Err(PdfOpsError::InvalidStructure(
-            "split-pages output pattern must contain exactly one %d".into(),
+            "output pattern must contain exactly one %d".into(),
         ));
     }
     Ok(())
