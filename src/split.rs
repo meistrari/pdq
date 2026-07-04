@@ -7,7 +7,7 @@ use lopdf::{dictionary, Document, Object};
 use rayon::prelude::*;
 
 use crate::{
-    copy::{copy_pages, resolve_page_ids, ObjectSource},
+    copy::{copy_pages_with_options, resolve_page_ids, CopyOptions, ObjectSource},
     lazy::LazyPdf,
     load::{load_document, map_file},
     range::{PageRangeError, PageRangeGroup},
@@ -29,9 +29,17 @@ pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
         .map(|output| {
             let page_numbers = output.range.resolve(pages.len())?;
             let page_ids = resolve_page_ids(&pages, &page_numbers)?;
+            // Pruning unreferenced resources only pays when the output keeps a
+            // subset of the pages: a full-document copy retains every resource
+            // anyway, so scanning each page's content (and nested form
+            // XObjects) to prove usage is pure overhead. Matches qpdf's
+            // `--remove-unreferenced-resources=auto`, which skips pruning for
+            // whole-file copies.
+            let prune_resources = page_ids.iter().collect::<BTreeSet<_>>().len() < pages.len();
             Ok(ResolvedSplitOutput {
                 path: output.path.clone(),
                 page_ids,
+                prune_resources,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -57,6 +65,10 @@ pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
             Ok(ResolvedSplitOutput {
                 path: render_output_pattern(output_pattern, page_number, width)?,
                 page_ids: vec![*page_id],
+                // split-pages always prunes: emitting page subsets is its
+                // whole purpose, and pruning single-page outputs (including
+                // the one-page-document edge) is long-standing behavior.
+                prune_resources: true,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -111,6 +123,7 @@ fn run_template_outputs(
 struct ResolvedSplitOutput {
     path: PathBuf,
     page_ids: Vec<lopdf::ObjectId>,
+    prune_resources: bool,
 }
 
 fn run_split_outputs(
@@ -119,7 +132,11 @@ fn run_split_outputs(
 ) -> Result<()> {
     let run_one = |output: &ResolvedSplitOutput| -> Result<()> {
         let mut target = empty_document();
-        let copied_pages = copy_pages(source, &mut target, &output.page_ids)?;
+        let options = CopyOptions {
+            prune_resources: output.prune_resources,
+            ..CopyOptions::default()
+        };
+        let copied_pages = copy_pages_with_options(source, &mut target, &output.page_ids, options)?;
         finish_pages(&mut target, &copied_pages)?;
         target.save(&output.path)?;
         Ok(())

@@ -124,12 +124,56 @@ parallelism compensating for much higher per-page cost.
   any scenario, and the Python bindings cost 60–100 ms of interpreter startup
   before any PDF work happens.
 
+## Real-world pathological corpus (measured 2026-07-03, post-optimization pdq)
+
+Re-ran the battery on the README's original real-world files (from
+`~/Downloads`): `ATOrd_0000710-74.2022.5.05.0037_1grau.pdf` (200 MB,
+12,732 pages) and `da67b971…b74ac….pdf` (26 MB, 2,642 pages). hyperfine
+warmup 1 / 5 runs (count: warmup 2 / 10 runs); timeouts from single probed
+runs capped at 120 s. The xref-only bootstrap engages on both files
+(`PDQ_TIMING`: parse ≈1.0 ms on the 200 MB file, ≈0.3 ms on the 26 MB one);
+fast and `--strict` counts agree with qpdf on both. Outputs validated:
+12,732 + 2,642 split files (first/middle/last `qpdf --check` OK), rewrite/
+range/merge page counts 12732 / 2642 / 101 / 15374 all `--check` OK.
+
+| scenario | pdq | qpdf | MuPDF | Poppler |
+| --- | ---: | ---: | ---: | ---: |
+| count 12,732p | **6.1 ms ± 0.3** (strict: 76 ms) | 14.5 ms ± 0.6 | 1.29 s ± 0.05 | 20.5 ms ± 1.1 |
+| count 2,642p | **6.2 ms ± 2.6** | 7.5 ms ± 0.4 | — | — |
+| split 12,732p → 1-page files | **1.05 s ± 0.07** | 4.94 s ± 0.29 | n/a | >120 s (6 files) |
+| split 2,642p → 1-page files | **280 ms ± 7** | >120 s (1,295 of 2,642) | n/a | >120 s (113 files) |
+| rewrite 12,732p | 636 ms ± 65 | 965 ms ± 57 | **603 ms ± 25** (tie, 1.05× ± 0.12) | — |
+| rewrite 2,642p | **108 ms ± 9** | 186 ms ± 3 | 126 ms ± 3 | — |
+| range 5000–5100 of 12,732p | 163 ms ± 15 | 353 ms ± 5 | **65 ms ± 1** | — |
+| merge 12,732 + 2,642 | **830 ms ± 47** | 1.42 s ± 0.03 | 9.45 s ± 0.22 | 24.8 s (single run) |
+
+Reading: on the pathological corpus pdq is now the fastest tool at count
+(2.4× over qpdf; the old validated walk itself got 5× faster than the
+pre-optimization 46 ms), split (4.7× over qpdf on the big file; only tool to
+finish the small one, 280 ms vs >120 s), merge (1.7× over qpdf), and rewrite
+of the 2,642-page file; big-file rewrite is a statistical tie with MuPDF.
+Only range extraction remains MuPDF's (65 vs 163 ms). pdq split wall time vs
+the pre-optimization README snapshot: 12,732-page split 1.75 → 1.05 s,
+2,642-page split 0.55 → 0.28 s.
+
+The 2,642-page rewrite was this corpus's last blowout loss (1.07 s, 9×
+behind MuPDF) and was root-caused by profiling: the file is a court-merge
+PDF where all 2,642 pages share ONE resource dictionary listing 2,642 form
+XObjects, so the >6-names pruning threshold engaged on every page and
+`collect_used_names` decompressed + fully tokenized every page's form —
+effectively re-tokenizing the whole document's content (~76% of wall time in
+`scan_names`). The fix matches qpdf's `--remove-unreferenced-resources=auto`
+semantics: a `split` output whose page set covers the entire document skips
+pruning (nothing can be dropped from a full copy). Subset ranges and
+split-pages still prune (validated: 100–200 extraction stays 2.7 MB with
+resources pruned). Result: 1.073 s → 108 ms, output slightly SMALLER than
+mutool's and qpdf's, all 73 tests green.
+
 ## Honest caveats
 
 - Synthetic corpus: uniform small pages, flat page tree, no images/fonts
-  variety, no damaged xrefs. Real-world messy PDFs are exactly where the
-  README shows qpdf/Poppler collapsing and pdq holding steady — that axis is
-  not re-tested here because those files aren't in the repo.
+  variety, no damaged xrefs. The section above covers the real-world
+  pathological axis with the README's original files.
 - Only structural operations were measured (pdq's scope). Rendering-class
   libraries (MuPDF, pdfium) obviously dominate a different axis entirely.
 - Single machine, macOS/arm64.
