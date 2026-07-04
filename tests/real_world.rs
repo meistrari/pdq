@@ -1107,6 +1107,30 @@ fn pje_like_full_rewrite_preserves_the_filter_zoo() {
 }
 
 #[test]
+fn full_rewrite_replaces_an_existing_output_file() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("trf4-like.pdf");
+    build_trf4_like(&input, TRF4_PAGES, false);
+    let output = temp.path().join("rewritten.pdf");
+    std::fs::write(&output, b"stale bytes from a previous run").unwrap();
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-z").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(
+        Document::load(&output).unwrap().get_pages().len(),
+        TRF4_PAGES
+    );
+    QpdfValidator::detect().validate(&output, TRF4_PAGES);
+}
+
+#[test]
 fn merge_concatenates_both_document_families() {
     let temp = tempdir().unwrap();
     let pje = temp.path().join("pje-like.pdf");
