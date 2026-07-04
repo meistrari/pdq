@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use crate::{
     copy::{copy_pages, resolve_page_ids, ObjectSource},
-    lazy::LazyPdf,
+    lazy::PdfSource,
     load::{load_document, map_file},
     range::{PageRangeError, PageRangeGroup},
     PdfOpsError, Result,
@@ -21,7 +21,18 @@ pub struct SplitOutput {
 }
 
 pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
-    let source = load_document(input)?;
+    split_with_password(input, outputs, None)
+}
+
+/// Like [`split`], additionally decrypting encrypted inputs with `password`
+/// when the empty user password does not authenticate. Outputs are always
+/// written unencrypted.
+pub fn split_with_password(
+    input: &Path,
+    outputs: &[SplitOutput],
+    password: Option<&str>,
+) -> Result<()> {
+    let source = load_document(input, password)?;
     let pages = source.get_pages();
     let resolved_outputs = outputs
         .iter()
@@ -43,16 +54,41 @@ pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
 pub struct SplitPagesOptions {
     /// Maximum number of consecutive pages written to each output file.
     pub pages_per_file: usize,
+    /// Password used to decrypt encrypted inputs. The empty user password is
+    /// always tried first, so owner-password-only files split without this.
+    /// Outputs are always written unencrypted.
+    pub password: Option<String>,
 }
 
 impl Default for SplitPagesOptions {
     fn default() -> Self {
-        Self { pages_per_file: 1 }
+        Self {
+            pages_per_file: 1,
+            password: None,
+        }
     }
 }
 
 pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
     split_pages_with_options(input, output_pattern, &SplitPagesOptions::default())
+}
+
+/// Like [`split_pages`], additionally decrypting encrypted inputs with
+/// `password` when the empty user password does not authenticate. Outputs are
+/// always written unencrypted.
+pub fn split_pages_with_password(
+    input: &Path,
+    output_pattern: &str,
+    password: Option<&str>,
+) -> Result<()> {
+    split_pages_with_options(
+        input,
+        output_pattern,
+        &SplitPagesOptions {
+            password: password.map(str::to_owned),
+            ..SplitPagesOptions::default()
+        },
+    )
 }
 
 pub fn split_pages_with_options(
@@ -68,7 +104,7 @@ pub fn split_pages_with_options(
     }
 
     let mmap = map_file(input)?;
-    let source = LazyPdf::parse(&mmap, input)?;
+    let source = PdfSource::open(&mmap, input, options.password.as_deref())?;
     let pages = source.page_ids()?;
     let page_count = pages.len();
     if page_count == 0 {

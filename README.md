@@ -9,10 +9,19 @@ Runtime constraints:
 - does not link libqpdf through FFI.
 
 The first implementation uses `lopdf` as a pure-Rust PDF object model and
-writer. It focuses on valid split/merge outputs for ordinary, unencrypted PDFs.
-Advanced qpdf behavior such as repair, encryption, linearization, forms,
-outlines, and full compatibility with unusual historical PDFs is intentionally
-out of scope for the current MVP.
+writer. It focuses on valid split/merge outputs for ordinary PDFs. Advanced
+qpdf behavior such as repair, linearization, forms, outlines, and full
+compatibility with unusual historical PDFs is intentionally out of scope for
+the current MVP.
+
+Encrypted PDFs (RC4, AES-128, AES-256) are supported as inputs: files are
+decrypted while loading, and outputs are always written unencrypted (like
+`qpdf --decrypt`). Files encrypted with only an owner password — the common
+case — open without any flags because the empty user password is tried first.
+Files that require a real password take `--password` on `split`,
+`split-pages`, `merge`, and `page-count`. `render` goes through hayro's own
+parser, which likewise opens owner-password-only files but has no
+`--password` option, so PDFs with a real user password cannot be rendered.
 
 ## Commands
 
@@ -23,6 +32,7 @@ cargo run --bin pdq -- split-pages --output 'page-%d.pdf' input.pdf
 cargo run --bin pdq -- split-pages --output 'chunk-%d.pdf' --pages-per-file 3 input.pdf
 cargo run --bin pdq -- merge --output merged.pdf a.pdf b.pdf
 cargo run --bin pdq -- page-count input.pdf
+cargo run --bin pdq -- split-pages --password secret --output 'page-%d.pdf' encrypted.pdf
 ```
 
 `split-pages --pages-per-file N` groups consecutive pages into files of at most
@@ -31,6 +41,9 @@ pages). The default of 1 writes one page per file.
 
 `page-count` prints the number of pages to stdout (the `lopdf`-native equivalent
 of `qpdf --show-npages`).
+
+`--password` decrypts inputs that need a user or owner password; the outputs
+of `split`, `split-pages`, and `merge` are written decrypted either way.
 
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.
