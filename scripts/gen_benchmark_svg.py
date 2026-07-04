@@ -55,7 +55,7 @@ PANELS = [
 ]
 
 HEADER_H = 96
-FOOTER_H = 56
+FOOTER_H = 104
 
 def panel_height(p):
     return PANEL_TITLE_H + len(p["rows"]) * ROW_PITCH
@@ -164,10 +164,18 @@ for i, p in enumerate(PANELS):
 
 fy = H - FOOTER_H + 10
 out.append(f'<line class="rule" x1="{PAD}" y1="{fy}" x2="{W - PAD}" y2="{fy}" stroke-width="1"/>')
-out.append(f'<text class="muted" x="{PAD}" y="{fy + 20}" font-size="11">'
-           f'hyperfine mean, warmup 1 / 5 runs (page count: 10) &#183; 120 s timeout &#183; outputs validated with qpdf --check &#183; bars scaled per scenario, axis broken where marked</text>')
-out.append(f'<text class="muted" x="{PAD}" y="{fy + 36}" font-size="11">'
-           f'Apple M4 Max &#183; macOS &#183; qpdf 12.3.2 &#183; MuPDF 1.28.0 &#183; Poppler 26.02 &#183; 2026-07-04</text>')
+FOOT_COLS = [
+    ("Method", ["hyperfine mean &#183; warmup 1, 5 runs", "page count: 10 runs &#183; 120 s timeout"]),
+    ("Validation", ["every output checked with qpdf --check", "bars scaled per scenario &#183; axis breaks marked"]),
+    ("Environment", ["Apple M4 Max &#183; qpdf 12.3.2 &#183; MuPDF 1.28.0", "Poppler 26.02 &#183; macOS &#183; 2026-07-04"]),
+]
+col_w = (W - 2 * PAD) / len(FOOT_COLS)
+for ci, (label, lines) in enumerate(FOOT_COLS):
+    cx = PAD + ci * col_w
+    out.append(f'<text class="muted" x="{cx:.0f}" y="{fy + 24}" font-size="9.5" font-weight="600" '
+               f'letter-spacing="0.9" style="text-transform:uppercase">{label.upper()}</text>')
+    for li, line in enumerate(lines):
+        out.append(f'<text class="ink2" x="{cx:.0f}" y="{fy + 44 + li * 17}" font-size="11">{line}</text>')
 out.append('</svg>')
 
 svg = "\n".join(out)
