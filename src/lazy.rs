@@ -5,12 +5,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use lopdf::{xref::XrefEntry, Document, Object, ObjectId, ObjectStream, Reader};
+use lopdf::{xref::XrefEntry, Dictionary, Document, Object, ObjectId, Reader, Stream};
 
 use crate::{
     copy::ObjectSource,
-    filter::normalize_stream_filter_names,
+    filter::decode_stream_in_place,
     load::{decorate_load_error, ensure_decrypted, load_options, upgrade_damaged_xref_error},
+    xrefboot::Lexer,
     PdfOpsError, Result,
 };
 
@@ -416,8 +417,8 @@ impl<'a> LazyPdf<'a> {
         let mut already_seen = HashSet::new();
         let container_object = self.reader.get_object(container_id, &mut already_seen)?;
         let mut container_stream = container_object.as_stream()?.clone();
-        normalize_stream_filter_names(&mut container_stream);
-        let object_stream = Arc::new(ObjectStream::new(&mut container_stream)?.objects);
+        decode_stream_in_place(&mut container_stream)?;
+        let object_stream = Arc::new(parse_object_stream(&container_stream)?);
         self.object_streams
             .lock()
             .expect("object stream cache mutex poisoned")
@@ -518,6 +519,99 @@ fn normalize_missing_xref(err: lopdf::Error, id: ObjectId) -> lopdf::Error {
         lopdf::Error::MissingXrefEntry => lopdf::Error::ObjectNotFound(id),
         other => other,
     }
+}
+
+fn parse_object_stream(
+    stream: &Stream,
+) -> std::result::Result<BTreeMap<ObjectId, Object>, lopdf::Error> {
+    if stream.content.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let first = object_stream_usize(&stream.dict, b"First")?;
+    if first > stream.content.len() {
+        return Err(lopdf::Error::InvalidOffset(first));
+    }
+
+    let count = object_stream_usize(&stream.dict, b"N")?;
+    let entries = parse_object_stream_entries(&stream.content[..first], count);
+    let sorted_offsets = sorted_object_stream_offsets(&entries);
+    let mut objects = BTreeMap::new();
+
+    for (id, offset) in entries {
+        if id == 0 {
+            continue;
+        }
+        let Some(start) = first
+            .checked_add(offset)
+            .filter(|start| *start < stream.content.len())
+        else {
+            continue;
+        };
+        let next_idx = sorted_offsets.partition_point(|next_offset| *next_offset <= offset);
+        let end = sorted_offsets
+            .get(next_idx)
+            .copied()
+            .and_then(|next_offset| first.checked_add(next_offset))
+            .filter(|end| *end <= stream.content.len())
+            .unwrap_or(stream.content.len());
+        if start >= end {
+            continue;
+        }
+
+        let mut lexer = Lexer {
+            buffer: &stream.content[start..end],
+            pos: 0,
+        };
+        let Some(object) = lexer.parse_object(0) else {
+            return Err(lopdf::Error::InvalidObjectStream(format!(
+                "failed to parse object {id} in object stream"
+            )));
+        };
+        objects.insert((id, 0), object);
+    }
+
+    Ok(objects)
+}
+
+fn object_stream_usize(
+    dict: &Dictionary,
+    key: &'static [u8],
+) -> std::result::Result<usize, lopdf::Error> {
+    let value = dict.get(key).and_then(Object::as_i64)?;
+    usize::try_from(value).map_err(|err| lopdf::Error::NumericCast(err.to_string()))
+}
+
+fn parse_object_stream_entries(index_block: &[u8], count: usize) -> Vec<(u32, usize)> {
+    let mut lexer = Lexer {
+        buffer: index_block,
+        pos: 0,
+    };
+    let mut entries = Vec::with_capacity(count);
+
+    while entries.len() < count {
+        lexer.skip_whitespace();
+        let Some(id) = lexer.parse_unsigned::<u32>() else {
+            break;
+        };
+        lexer.skip_whitespace();
+        let Some(offset) = lexer.parse_unsigned::<usize>() else {
+            break;
+        };
+        entries.push((id, offset));
+    }
+
+    entries
+}
+
+fn sorted_object_stream_offsets(entries: &[(u32, usize)]) -> Vec<usize> {
+    let mut offsets = entries
+        .iter()
+        .map(|(_, offset)| *offset)
+        .collect::<Vec<_>>();
+    offsets.sort_unstable();
+    offsets.dedup();
+    offsets
 }
 
 fn validate_compressed_containers(document: &Document) -> Result<()> {
@@ -634,11 +728,11 @@ impl ObjectStreamCache {
 
 #[cfg(test)]
 mod tests {
-    use lopdf::{Object, Stream};
+    use lopdf::{dictionary, Object, Stream};
 
     use super::{
-        cacheable_normal_object, Arc, NormalObjectCache, NORMAL_CACHE_MAX_STREAM_BYTES,
-        NORMAL_CACHE_SHARDS, NORMAL_CACHE_SHARD_LIMIT,
+        cacheable_normal_object, parse_object_stream, Arc, NormalObjectCache,
+        NORMAL_CACHE_MAX_STREAM_BYTES, NORMAL_CACHE_SHARDS, NORMAL_CACHE_SHARD_LIMIT,
     };
 
     #[test]
@@ -681,5 +775,78 @@ mod tests {
         assert!(cacheable_normal_object(&Object::Stream(small)));
         assert!(!cacheable_normal_object(&Object::Stream(large)));
         assert!(cacheable_normal_object(&Object::Integer(7)));
+    }
+
+    #[test]
+    fn object_stream_parser_skips_qdf_comments_before_member_objects() {
+        let stream = object_stream_from_members(&[
+            (
+                2,
+                b"%% Object stream: object 2, index 0\n<< /Type /Catalog /Pages 3 0 R >>\n",
+            ),
+            (
+                3,
+                b"%% Object stream: object 3, index 1\n<< /Type /Pages /Count 1 /Kids [4 0 R] >>\n",
+            ),
+            (
+                4,
+                b"%% Object stream: object 4, index 2\n%% Page 1\n<< /Type /Page /Parent 3 0 R >>\n",
+            ),
+        ]);
+
+        let objects = parse_object_stream(&stream).unwrap();
+
+        assert!(matches!(
+            objects[&(2, 0)].as_dict().unwrap().get(b"Type").unwrap(),
+            Object::Name(name) if name == b"Catalog"
+        ));
+        assert!(matches!(
+            objects[&(3, 0)].as_dict().unwrap().get(b"Type").unwrap(),
+            Object::Name(name) if name == b"Pages"
+        ));
+        assert!(matches!(
+            objects[&(4, 0)].as_dict().unwrap().get(b"Type").unwrap(),
+            Object::Name(name) if name == b"Page"
+        ));
+    }
+
+    #[test]
+    fn object_stream_parser_uses_offsets_for_adjacent_numeric_objects() {
+        let stream = object_stream_from_members(&[(2, b"123"), (3, b"456")]);
+
+        let objects = parse_object_stream(&stream).unwrap();
+
+        assert_eq!(objects[&(2, 0)], Object::Integer(123));
+        assert_eq!(objects[&(3, 0)], Object::Integer(456));
+    }
+
+    #[test]
+    fn object_stream_parser_reports_member_parse_failure() {
+        let stream = object_stream_from_members(&[(9, b"%% only a comment, no object\n")]);
+
+        let err = parse_object_stream(&stream).unwrap_err().to_string();
+        assert!(
+            err.contains("failed to parse object 9"),
+            "unexpected object-stream error: {err}"
+        );
+    }
+
+    fn object_stream_from_members(members: &[(u32, &[u8])]) -> Stream {
+        let mut header = Vec::new();
+        let mut body = Vec::new();
+        for (id, object) in members {
+            header.extend_from_slice(format!("{id} {} ", body.len()).as_bytes());
+            body.extend_from_slice(object);
+        }
+        let first = header.len();
+        header.extend_from_slice(&body);
+        Stream::new(
+            dictionary! {
+                "Type" => "ObjStm",
+                "N" => members.len() as i64,
+                "First" => first as i64,
+            },
+            header,
+        )
     }
 }
