@@ -1,6 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 
 use lopdf::{dictionary, Document, Object};
@@ -64,7 +68,7 @@ pub fn split_with_password(
             let pages: BTreeMap<u32, lopdf::ObjectId> = (1u32..).zip(ordered_pages).collect();
             let resolved_outputs = resolve_split_outputs(outputs, &pages, true)?;
             reject_duplicate_output_paths(&resolved_outputs)?;
-            run_split_outputs(source, &resolved_outputs)
+            with_prune_fallback_report(|| run_split_outputs(source, &resolved_outputs))
         });
     }
 
@@ -108,7 +112,7 @@ pub fn split_with_password(
     }
     let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
     reject_duplicate_output_paths(&resolved_outputs)?;
-    run_split_outputs(&source, &resolved_outputs)
+    with_prune_fallback_report(|| run_split_outputs(&source, &resolved_outputs))
 }
 
 /// Unbounded split through the lazy source: the fallback when the eager
@@ -124,7 +128,7 @@ fn split_via_lazy(input: &Path, password: Option<&str>, outputs: &[SplitOutput])
         let pages: BTreeMap<u32, lopdf::ObjectId> = (1u32..).zip(ordered_pages).collect();
         let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
         reject_duplicate_output_paths(&resolved_outputs)?;
-        run_split_outputs(source, &resolved_outputs)
+        with_prune_fallback_report(|| run_split_outputs(source, &resolved_outputs))
     })
 }
 
@@ -259,19 +263,51 @@ pub fn split_pages_with_options(
         // page once, then emit only page-specific objects per output. Falls
         // back to the generic per-output Document path whenever the template
         // cannot be prepared.
-        if options.pages_per_file == 1 {
-            if let Some(template) = SinglePageTemplate::prepare(source, &pages) {
-                return run_template_outputs(source, &template, &resolved_outputs);
+        with_prune_fallback_report(|| {
+            if options.pages_per_file == 1 {
+                if let Some(template) = SinglePageTemplate::prepare(source, &pages) {
+                    return run_template_outputs(source, &template, &resolved_outputs);
+                }
             }
-        }
 
-        run_split_outputs(source, &resolved_outputs)
+            run_split_outputs(source, &resolved_outputs)
+        })
     })
+}
+
+fn with_prune_fallback_report<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    if std::env::var_os("PDQ_TIMING").is_none() {
+        return operation();
+    }
+
+    let _report_lock = RESOURCE_PRUNE_FALLBACK_REPORT
+        .lock()
+        .expect("resource prune fallback report mutex poisoned");
+    let start = resource_prune_fallback_count();
+    let result = operation();
+    let fallback_count = resource_prune_fallback_count().saturating_sub(start);
+    if fallback_count > 0 {
+        eprintln!(
+            "pdq: warning: resource pruning fallback used for {fallback_count} page resource \
+             dictionaries; outputs may include unreferenced resources"
+        );
+    }
+    result
 }
 
 /// Concurrent output-file writes allowed during a template split; see
 /// [`WriteGate`] for why this is small.
 const MAX_CONCURRENT_SPLIT_WRITES: usize = 4;
+static RESOURCE_PRUNE_FALLBACKS: AtomicUsize = AtomicUsize::new(0);
+static RESOURCE_PRUNE_FALLBACK_REPORT: Mutex<()> = Mutex::new(());
+
+pub(crate) fn record_resource_prune_fallback() {
+    RESOURCE_PRUNE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn resource_prune_fallback_count() -> usize {
+    RESOURCE_PRUNE_FALLBACKS.load(Ordering::Relaxed)
+}
 
 fn run_template_outputs(
     source: &(impl ObjectSource + Sync),

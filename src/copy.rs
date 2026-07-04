@@ -16,7 +16,6 @@ use crate::{
 const INHERITABLE_PAGE_ATTRS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 const MAX_COPY_DEPTH: usize = 256;
 const RESOURCE_PRUNE_MIN_NAMES: usize = 6;
-
 pub(crate) trait ObjectSource {
     fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error>;
 }
@@ -338,11 +337,15 @@ impl CopyContext {
             &mut self.used_names_cache,
         )?
         else {
+            record_resource_prune_fallback();
             return self.copy_value(source, target, value, depth + 1);
         };
         match self.copy_pruned_resources(source, target, &resources, &used, depth + 1)? {
             Some(pruned) => Ok(pruned),
-            None => self.copy_value(source, target, value, depth + 1),
+            None => {
+                record_resource_prune_fallback();
+                self.copy_value(source, target, value, depth + 1)
+            }
         }
     }
 
@@ -678,6 +681,10 @@ impl CopyContext {
         self.inherited_attrs_cache.insert(id, Arc::clone(&attrs));
         Ok(Some(attrs))
     }
+}
+
+fn record_resource_prune_fallback() {
+    crate::split::record_resource_prune_fallback();
 }
 
 enum ResolvedDictionary<'a> {

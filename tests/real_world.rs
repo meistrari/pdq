@@ -1198,9 +1198,9 @@ fn page_count_rejects_direct_page_tree_kids() {
 }
 
 #[test]
-fn trf4_like_with_content_comments_still_splits_into_valid_pages() {
-    // % comments in content streams defeat strict content parsing, which
-    // disables resource pruning; outputs get bigger but must stay correct
+fn trf4_like_with_content_comments_still_prunes_shared_resources() {
+    // % comments are legal in content streams and must not disable resource
+    // pruning; each output should keep only the form it actually draws.
     let temp = tempdir().unwrap();
     let input = temp.path().join("trf4-like-comments.pdf");
     build_trf4_like(&input, TRF4_PAGES, true);
@@ -1212,10 +1212,27 @@ fn trf4_like_with_content_comments_still_splits_into_valid_pages() {
     let outputs: Vec<_> = fs::read_dir(&out_dir).unwrap().collect();
     assert_eq!(outputs.len(), TRF4_PAGES);
 
+    let input_len = fs::metadata(&input).unwrap().len();
     let qpdf = QpdfValidator::detect();
-    for page in [1, TRF4_PAGES] {
+    for page in [1, 30, TRF4_PAGES] {
         let path = out_dir.join(split_page_name(page, TRF4_PAGES));
-        assert_eq!(Document::load(&path).unwrap().get_pages().len(), 1);
+        let document = Document::load(&path).unwrap();
+        let names = page_xobject_names(&document, single_page_id(&document));
+        assert_eq!(
+            names,
+            vec![format!("TPL{}", page - 1)],
+            "page {page} must keep only its own template after pruning"
+        );
         qpdf.validate(&path, 1);
     }
+
+    let mut largest = 0;
+    for entry in fs::read_dir(&out_dir).unwrap() {
+        largest = largest.max(fs::metadata(entry.unwrap().path()).unwrap().len());
+    }
+    assert!(
+        largest < input_len / 3,
+        "single-page output of {largest} bytes suggests comment-bearing \
+         content disabled resource pruning (input is {input_len} bytes)"
+    );
 }

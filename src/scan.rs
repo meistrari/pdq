@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     ops::Deref,
     rc::Rc,
@@ -223,7 +224,8 @@ fn collect_form_names(
 }
 
 fn scan_names(data: &[u8]) -> Option<UsedNames> {
-    let content = Content::decode_strict(data).ok()?;
+    let stripped = strip_content_comments(data);
+    let content = Content::decode_strict(stripped.as_ref()).ok()?;
     let mut used = UsedNames::default();
     let mut last_name: Option<&[u8]> = None;
 
@@ -243,6 +245,111 @@ fn scan_names(data: &[u8]) -> Option<UsedNames> {
     }
 
     Some(used)
+}
+
+fn strip_content_comments(data: &[u8]) -> Cow<'_, [u8]> {
+    let mut stripped: Option<Vec<u8>> = None;
+    let mut i = 0;
+    let mut literal_depth = 0usize;
+    let mut in_hex_string = false;
+
+    while i < data.len() {
+        let byte = data[i];
+
+        if literal_depth > 0 {
+            if let Some(output) = stripped.as_mut() {
+                output.push(byte);
+            }
+            match byte {
+                b'\\' => {
+                    i += 1;
+                    if i < data.len() {
+                        if let Some(output) = stripped.as_mut() {
+                            output.push(data[i]);
+                        }
+                        i += 1;
+                    }
+                }
+                b'(' => {
+                    literal_depth += 1;
+                    i += 1;
+                }
+                b')' => {
+                    literal_depth -= 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+
+        if in_hex_string {
+            if let Some(output) = stripped.as_mut() {
+                output.push(byte);
+            }
+            if byte == b'>' {
+                in_hex_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match byte {
+            b'%' => {
+                let output = stripped.get_or_insert_with(|| data[..i].to_vec());
+                output.push(b' ');
+                i += 1;
+                while i < data.len() && data[i] != b'\r' && data[i] != b'\n' {
+                    i += 1;
+                }
+                if i < data.len() {
+                    output.push(data[i]);
+                    if data[i] == b'\r' && i + 1 < data.len() && data[i + 1] == b'\n' {
+                        i += 1;
+                        output.push(data[i]);
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => {
+                if let Some(output) = stripped.as_mut() {
+                    output.push(byte);
+                }
+                literal_depth = 1;
+                i += 1;
+            }
+            b'<' if data.get(i + 1) == Some(&b'<') => {
+                if let Some(output) = stripped.as_mut() {
+                    output.extend_from_slice(b"<<");
+                }
+                i += 2;
+            }
+            b'<' if data.get(i + 1) != Some(&b'<') => {
+                if let Some(output) = stripped.as_mut() {
+                    output.push(byte);
+                }
+                in_hex_string = true;
+                i += 1;
+            }
+            b'>' if data.get(i + 1) == Some(&b'>') => {
+                if let Some(output) = stripped.as_mut() {
+                    output.extend_from_slice(b">>");
+                }
+                i += 2;
+            }
+            _ => {
+                if let Some(output) = stripped.as_mut() {
+                    output.push(byte);
+                }
+                i += 1;
+            }
+        }
+    }
+
+    match stripped {
+        Some(stripped) => Cow::Owned(stripped),
+        None => Cow::Borrowed(data),
+    }
 }
 
 fn scan_names_cached(
@@ -474,5 +581,32 @@ mod tests {
     #[test]
     fn strict_scan_rejects_trailing_invalid_content() {
         assert!(scan_names(b"/TPL0 Do @@@").is_none());
+    }
+
+    #[test]
+    fn scan_tolerates_content_stream_comments() {
+        let used = scan_names(b"q /TPL0 Do\n% producer comment\nBT /F1 12 Tf ET Q").unwrap();
+
+        assert!(used.contains(b"TPL0"));
+        assert!(used.contains(b"F1"));
+    }
+
+    #[test]
+    fn scan_preserves_percent_inside_literal_strings() {
+        let used = scan_names(b"(% not a comment) Tj /TPL0 Do").unwrap();
+
+        assert!(used.contains(b"TPL0"));
+    }
+
+    #[test]
+    fn scan_preserves_percent_inside_hex_strings() {
+        assert!(scan_names(b"<% not a comment\n> /TPL0 Do").is_none());
+    }
+
+    #[test]
+    fn scan_strips_comments_after_inline_dictionaries() {
+        let used = scan_names(b"<< /MCID 0 >> BDC % producer comment\n/TPL0 Do EMC").unwrap();
+
+        assert!(used.contains(b"TPL0"));
     }
 }

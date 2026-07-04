@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use lopdf::Document;
+use lopdf::{dictionary, Dictionary, Document, Object, Stream};
 use predicates::prelude::*;
 use tempfile::tempdir;
 
@@ -409,6 +409,32 @@ fn split_pages_cli_chunks_and_decrypts_with_password() {
 }
 
 #[test]
+fn split_pages_cli_reports_prune_fallback_when_timing_is_enabled() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("malformed-content.pdf");
+    write_prune_fallback_fixture(&input);
+
+    pdq()
+        .arg("split-pages")
+        .arg(&input)
+        .arg("--output")
+        .arg(temp.path().join("quiet-%d.pdf"))
+        .assert()
+        .success()
+        .stderr("");
+
+    pdq()
+        .env("PDQ_TIMING", "1")
+        .arg("split-pages")
+        .arg(&input)
+        .arg("--output")
+        .arg(temp.path().join("fallback-%d.pdf"))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("resource pruning fallback used"));
+}
+
+#[test]
 fn split_pages_cli_rejects_zero_pages_per_file() {
     let temp = tempdir().unwrap();
 
@@ -441,4 +467,76 @@ fn cli_help_lists_subcommands() {
             .and(predicate::str::contains("split-pages"))
             .and(predicate::str::contains("merge")),
     );
+}
+
+fn write_prune_fallback_fixture(path: &Path) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let resources_id = document.new_object_id();
+    let page_id = document.new_object_id();
+    let content_id = document.new_object_id();
+    let mut xobjects = Dictionary::new();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => 1,
+        }
+        .into(),
+    );
+
+    for index in 0..7 {
+        let form_id = document.new_object_id();
+        xobjects.set(format!("X{index}"), form_id);
+        document.objects.insert(
+            form_id,
+            Object::Stream(Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => Object::Array(vec![0.into(), 0.into(), 10.into(), 10.into()]),
+                    "Resources" => dictionary! {},
+                },
+                b"q Q".to_vec(),
+            )),
+        );
+    }
+
+    document.objects.insert(
+        resources_id,
+        dictionary! {
+            "XObject" => Object::Dictionary(xobjects),
+        }
+        .into(),
+    );
+    document.objects.insert(
+        content_id,
+        Object::Stream(Stream::new(Dictionary::new(), b"q /X0 Do @@@ Q".to_vec())),
+    );
+    document.objects.insert(
+        page_id,
+        dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+            "Resources" => resources_id,
+            "Contents" => content_id,
+        }
+        .into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save prune-fallback fixture: {err}"));
 }
