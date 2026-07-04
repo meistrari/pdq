@@ -10,9 +10,10 @@ Runtime constraints:
 
 The first implementation uses `lopdf` as a pure-Rust PDF object model and
 writer. It focuses on valid split/merge outputs for ordinary PDFs. Advanced
-qpdf behavior such as repair, linearization, forms, outlines, and full
-compatibility with unusual historical PDFs is intentionally out of scope for
-the current MVP.
+qpdf behavior such as linearization, forms, outlines, and full compatibility
+with unusual historical PDFs is intentionally out of scope for the current
+MVP. Damaged cross-reference data is the one repair pdq performs — see
+[Repair](#repair).
 
 Encrypted PDFs (RC4, AES-128, AES-256) are supported as inputs: files are
 decrypted while loading, and outputs are always written unencrypted (like
@@ -52,6 +53,24 @@ of `split`, `split-pages`, and `merge` are written decrypted either way.
 Tests may use `qpdf` as a development validator when it is available on `PATH`.
 The runtime implementation must remain qpdf-free.
 
+## Repair
+
+Files with damaged cross-reference data — truncated or garbage xref tables,
+destroyed trailers, tables whose offsets point at the wrong objects — are
+repaired automatically, the way qpdf, Poppler, and pdf.js recover them: the
+raw file is scanned for `N G obj` headers and the cross-reference table is
+rebuilt from what is actually there (best effort). Repair is strictly a last
+resort and never runs on well-formed files: it only starts after the normal
+parse fails, or after a fetch proves the xref lies about an offset, so
+healthy files pay nothing for it. A repaired read emits one warning line on
+stderr, and outputs built from a repaired source are always full rewrites
+with a fresh, valid xref — never byte copies of the damage.
+
+Two classes stay hard errors by design: encrypted files with damaged xref
+data (repair cannot decrypt; the error suggests a dedicated repair tool), and
+files where no catalog can be recovered at all. In both cases the error names
+the damaged cross-reference data rather than a generic parse failure.
+
 ## Render
 
 `pdq render` rasterizes pages to PNG through [hayro](https://github.com/LaurenzV/hayro),
@@ -60,6 +79,32 @@ Pages render in parallel and `%d` in the output pattern receives the original,
 zero-padded page number. The command lives behind the `render` cargo feature,
 which is enabled by default; build with `--no-default-features` for a smaller
 split/merge-only binary. Rendering requires Rust 1.92 or newer.
+
+## Real-Document Testing
+
+`tests/real_world.rs` builds raw-byte replicas of the two court-document
+families from the benchmark corpus (deep balanced page tree with an image
+filter zoo; flat page tree with one shared resources dictionary) and asserts
+split/merge behavior on them, including resource-pruning regression guards.
+
+`tests/corpus.rs` runs pdq against a directory of actual PDFs with qpdf as
+ground truth, classifying each file (pass / note / skip / warn / fail):
+
+```sh
+scripts/fetch_corpus.sh --fixtures --qpdf --pdfjs   # reproducible anywhere
+scripts/fetch_corpus.sh --local ~/Downloads          # plus your own PDFs
+cargo test --release --test corpus -- --ignored --nocapture
+```
+
+No PDFs are versioned: `--qpdf`/`--pdfjs` fetch the public test corpora from
+their upstream repositories, and `--fixtures` regenerates the anonymized
+benchmark replicas (12,732 and 2,642 pages) from the seeded generator in
+`scripts/make_fixtures.py` — private documents stay strictly local.
+
+The corpus lives in `corpus/` (gitignored; local files are symlinked). Use
+`PDQ_CORPUS_DIR` to point elsewhere, `PDQ_CORPUS_MAX_FILES` to cap a run, and
+`PDQ_CORPUS_STRICT=1` to also fail on scope gaps where qpdf handles a file
+that pdq refuses.
 
 ## Benchmarks
 

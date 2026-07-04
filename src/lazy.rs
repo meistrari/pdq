@@ -9,7 +9,7 @@ use lopdf::{xref::XrefEntry, Document, Object, ObjectId, ObjectStream, Reader};
 
 use crate::{
     copy::ObjectSource,
-    load::{decorate_load_error, ensure_decrypted, load_options},
+    load::{decorate_load_error, ensure_decrypted, load_options, upgrade_damaged_xref_error},
     PdfOpsError, Result,
 };
 
@@ -61,20 +61,66 @@ impl<'a> PdfSource<'a> {
         // parse below so behavior is identical to the slow path.
         if let Some(document) = crate::xrefboot::bootstrap_document(buffer) {
             if !document.is_encrypted() && !document.was_encrypted() {
-                return Ok(Self::Lazy(LazyPdf::new(buffer, document)?));
+                // A bootstrap that parses but fails validation (e.g. a
+                // compressed entry naming a non-normal container) is damage
+                // the full parse or the repair scan may untangle, so only a
+                // success returns early.
+                if let Ok(lazy) = LazyPdf::new(buffer, document, false) {
+                    return Ok(Self::Lazy(lazy));
+                }
             }
         } else if std::env::var_os("PDQ_TIMING").is_some() {
             eprintln!("phase parse: xref bootstrap fell back to full lopdf parse");
         }
 
-        let document =
-            Document::load_mem_with_options(buffer, load_options(password, Some(drop_object)))
-                .map_err(|err| decorate_load_error(err, path))?;
+        let document = match Document::load_mem_with_options(
+            buffer,
+            load_options(password, Some(drop_object)),
+        ) {
+            Ok(document) => document,
+            // A wrong password keeps its dedicated error: the file is not
+            // damaged and reconstruction could not decrypt it anyway.
+            Err(err @ lopdf::Error::InvalidPassword) => return Err(decorate_load_error(err, path)),
+            // Last chance (issue #14): the xref/trailer data is unusable, so
+            // rebuild it from a raw object scan. Only already-failing files
+            // reach this, so well-formed inputs never pay for it.
+            Err(err) => {
+                return match Self::open_repaired(buffer, path) {
+                    Some(source) => Ok(source),
+                    None => Err(upgrade_damaged_xref_error(err, path)),
+                }
+            }
+        };
         ensure_decrypted(&document, path)?;
         if document.was_encrypted() {
             return Ok(Self::Eager(document));
         }
-        Ok(Self::Lazy(LazyPdf::new(buffer, document)?))
+        Ok(Self::Lazy(LazyPdf::new(buffer, document, false)?))
+    }
+
+    /// Open by reconstructing the xref from a raw object scan, bypassing the
+    /// file's own (damaged) cross-reference data entirely. `None` when the
+    /// buffer cannot be repaired — encrypted, or no recoverable catalog —
+    /// in which case callers surface their original error.
+    pub(crate) fn open_repaired(buffer: &'a [u8], path: &Path) -> Option<Self> {
+        let document = crate::repair::reconstruct_document(buffer)?;
+        let lazy = LazyPdf::new(buffer, document, true).ok()?;
+        eprintln!(
+            "pdq: warning: {}: damaged cross-reference data; reconstructed by \
+             scanning the file (best effort)",
+            path.display()
+        );
+        Some(Self::Lazy(lazy))
+    }
+
+    /// True when the source was built from a reconstructed xref. Repaired
+    /// sources must be rewritten — never byte-copied — so outputs get a
+    /// valid cross-reference table instead of a copy of the damage.
+    pub(crate) fn repaired(&self) -> bool {
+        match self {
+            Self::Lazy(lazy) => lazy.repaired,
+            Self::Eager(_) => false,
+        }
     }
 
     pub(crate) fn page_ids(&self) -> Result<Vec<ObjectId>> {
@@ -134,12 +180,14 @@ pub(crate) struct LazyPdf<'a> {
     reader: Reader<'a>,
     object_streams: Mutex<ObjectStreamCache>,
     normal_objects: NormalObjectCache,
+    /// True when the reference table was reconstructed by `crate::repair`.
+    repaired: bool,
 }
 
 impl<'a> LazyPdf<'a> {
     /// Build the lazy reader from a metadata-only `Document` (trailer and
     /// xref, no objects) previously loaded from `buffer`.
-    fn new(buffer: &'a [u8], document: Document) -> Result<Self> {
+    fn new(buffer: &'a [u8], document: Document, repaired: bool) -> Result<Self> {
         let reader = Reader {
             buffer,
             document,
@@ -153,6 +201,7 @@ impl<'a> LazyPdf<'a> {
             reader,
             object_streams: Mutex::new(ObjectStreamCache::default()),
             normal_objects: NormalObjectCache::default(),
+            repaired,
         })
     }
 
@@ -434,11 +483,25 @@ fn classify_page_dict(object: &Object) -> Result<PageNode> {
                 .get(b"Kids")
                 .and_then(Object::as_array)
                 .map_err(PdfOpsError::Pdf)?;
-            Ok(PageNode::Interior(
-                kids.iter()
-                    .filter_map(|kid| kid.as_reference().ok())
-                    .collect(),
-            ))
+            let mut kid_ids = Vec::with_capacity(kids.len());
+            for kid in kids {
+                match kid {
+                    Object::Reference(kid_id) => kid_ids.push(*kid_id),
+                    // A direct page dict has no object id, so split could
+                    // never copy it; refuse loudly instead of silently
+                    // under-counting (qpdf-qtest 0213).
+                    Object::Dictionary(_) => {
+                        return Err(PdfOpsError::InvalidStructure(
+                            "page tree kid is a direct object; pages must be \
+                             indirect references"
+                                .into(),
+                        ));
+                    }
+                    // tolerate nulls and other junk in Kids arrays
+                    _ => {}
+                }
+            }
+            Ok(PageNode::Interior(kid_ids))
         }
         _ => Ok(PageNode::Other),
     }

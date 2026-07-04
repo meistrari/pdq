@@ -19,7 +19,6 @@ Stream counts and per-class stream length distributions are taken from
 census JSONs (lengths-pje.json / lengths-trf4.json) so file sizes and
 per-object cost profiles match the originals closely.
 """
-import io
 import json
 import struct
 import sys
@@ -89,12 +88,12 @@ def plain_ops(base: bytes, target: int) -> bytes:
 
 
 class JpegFactory:
+    """Valid JPEG payloads of arbitrary exact size: the repo's tiny noise
+    JPEG fixture, grown with COM segments before the EOI marker."""
+
     def __init__(self):
-        from PIL import Image
-        img = Image.frombytes("L", (32, 32), RNG.randbytes(32 * 32))
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=70)
-        self.template = buf.getvalue()
+        template_path = HERE.parent / "tests" / "fixtures" / "tiny-gray.jpg"
+        self.template = template_path.read_bytes()
         assert self.template.endswith(b"\xff\xd9")
 
     def make(self, target: int) -> bytes:
@@ -205,14 +204,14 @@ def flate_image(pdf: Builder, target: int, with_type: bool, ncomp: int = 3,
 def dct_image(pdf: Builder, target: int, with_type: bool) -> int:
     data = JPEG.make(target)
     return pdf.add_stream(
-        image_dict(with_type, b"/DCTDecode", 32, 32,
+        image_dict(with_type, b"/DCTDecode", 8, 8,
                    b"/ColorSpace/DeviceGray", 8), data)
 
 
 def flate_dct_image(pdf: Builder, target: int, with_type: bool) -> int:
     data = zlib.compress(JPEG.make(max(0, target - 11)), 6)
     return pdf.add_stream(
-        image_dict(with_type, b"[/FlateDecode/DCTDecode]", 32, 32,
+        image_dict(with_type, b"[/FlateDecode/DCTDecode]", 8, 8,
                    b"/ColorSpace/DeviceGray", 8), data)
 
 
@@ -835,10 +834,8 @@ def build_trf4(out_path: Path):
 
 
 if __name__ == "__main__":
-    out_a = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-        "/Users/henrique/Downloads/anon-pje-like-12732p.pdf")
-    out_b = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(
-        "/Users/henrique/Downloads/anon-trf4-like-2642p.pdf")
+    out_a = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("anon-pje-like-12732p.pdf")
+    out_b = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("anon-trf4-like-2642p.pdf")
     print("building B (TRF4-like, 2642p)...")
     build_trf4(out_b)
     print("  ->", out_b, out_b.stat().st_size, "bytes")

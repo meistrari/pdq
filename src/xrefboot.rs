@@ -117,7 +117,7 @@ pub(crate) fn bootstrap_document(buffer: &[u8]) -> Option<Document> {
     Some(document)
 }
 
-fn parse_version(buffer: &[u8]) -> Option<String> {
+pub(crate) fn parse_version(buffer: &[u8]) -> Option<String> {
     let rest = buffer.strip_prefix(b"%PDF-")?;
     let len = rest
         .iter()
@@ -422,13 +422,15 @@ fn read_big_endian(bytes: &[u8]) -> u64 {
 /// Minimal hand-rolled tokenizer/object parser: just enough of the PDF object
 /// grammar for trailer dictionaries and xref-stream headers (names, numbers,
 /// booleans, null, references, arrays, dictionaries, hex/literal strings).
-struct Lexer<'a> {
-    buffer: &'a [u8],
-    pos: usize,
+/// Shared with `crate::repair`, which re-parses recovered object headers and
+/// trailer candidates with the same grammar.
+pub(crate) struct Lexer<'a> {
+    pub(crate) buffer: &'a [u8],
+    pub(crate) pos: usize,
 }
 
 impl<'a> Lexer<'a> {
-    fn peek(&self) -> Option<u8> {
+    pub(crate) fn peek(&self) -> Option<u8> {
         self.buffer.get(self.pos).copied()
     }
 
@@ -446,7 +448,7 @@ impl<'a> Lexer<'a> {
         self.buffer.len() - self.pos
     }
 
-    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take(&mut self, len: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(len)?;
         if end > self.buffer.len() {
             return None;
@@ -456,7 +458,7 @@ impl<'a> Lexer<'a> {
         Some(slice)
     }
 
-    fn skip_whitespace(&mut self) {
+    pub(crate) fn skip_whitespace(&mut self) {
         while let Some(byte) = self.peek() {
             if is_whitespace(byte) {
                 self.pos += 1;
@@ -476,7 +478,7 @@ impl<'a> Lexer<'a> {
 
     /// Consume `keyword` if it is present at the cursor and ends at a token
     /// boundary (whitespace, delimiter, or end of input).
-    fn try_keyword(&mut self, keyword: &[u8]) -> bool {
+    pub(crate) fn try_keyword(&mut self, keyword: &[u8]) -> bool {
         let end = self.pos + keyword.len();
         if self.buffer.len() < end || &self.buffer[self.pos..end] != keyword {
             return false;
@@ -490,7 +492,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn parse_unsigned<T: TryFrom<u64>>(&mut self) -> Option<T> {
+    pub(crate) fn parse_unsigned<T: TryFrom<u64>>(&mut self) -> Option<T> {
         let start = self.pos;
         let mut value: u64 = 0;
         while let Some(byte) = self.peek() {
@@ -508,7 +510,7 @@ impl<'a> Lexer<'a> {
 
     /// The EOL that separates the `stream` keyword from the stream data:
     /// CRLF or LF per spec, plus lone CR for robustness.
-    fn consume_stream_eol(&mut self) -> Option<()> {
+    pub(crate) fn consume_stream_eol(&mut self) -> Option<()> {
         match self.next_byte()? {
             b'\n' => Some(()),
             b'\r' => {
@@ -521,7 +523,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn parse_object(&mut self, depth: usize) -> Option<Object> {
+    pub(crate) fn parse_object(&mut self, depth: usize) -> Option<Object> {
         if depth > MAX_OBJECT_DEPTH {
             return None;
         }
@@ -738,11 +740,11 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn is_whitespace(byte: u8) -> bool {
+pub(crate) fn is_whitespace(byte: u8) -> bool {
     matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
 }
 
-fn is_delimiter(byte: u8) -> bool {
+pub(crate) fn is_delimiter(byte: u8) -> bool {
     matches!(
         byte,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'

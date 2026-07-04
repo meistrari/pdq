@@ -8,9 +8,9 @@ use rayon::prelude::*;
 
 use crate::{
     copy::{copy_pages_with_options, resolve_page_ids, CopyOptions, ObjectSource},
-    lazy::PdfSource,
     load::{load_document, map_file},
     range::{PageRangeError, PageRangeGroup},
+    repair::with_repair_retry,
     split_template::{SinglePageTemplate, WriteGate},
     PdfOpsError, Result,
 };
@@ -54,22 +54,82 @@ pub fn split_with_password(
         // Every bounded output is treated as a subset (a prefix walk cannot
         // prove full coverage), so pruning stays on.
         let mmap = map_file(input)?;
-        let source = PdfSource::open(&mmap, input, password)?;
-        let ordered_pages = source.page_ids_up_to(limit)?;
+        return with_repair_retry(&mmap, input, password, |source| {
+            let ordered_pages = source.page_ids_up_to(limit)?;
+            if ordered_pages.is_empty() {
+                return Err(PdfOpsError::Range(PageRangeError::NoPages));
+            }
+            let pages: BTreeMap<u32, lopdf::ObjectId> = (1u32..).zip(ordered_pages).collect();
+            let resolved_outputs = resolve_split_outputs(outputs, &pages, true)?;
+            reject_duplicate_output_paths(&resolved_outputs)?;
+            run_split_outputs(source, &resolved_outputs)
+        });
+    }
+
+    let source = match load_document(input, password) {
+        Ok(source) => source,
+        // The eager parse failed structurally, or tolerated its way to an
+        // empty page tree. Retry through the lazy source, which can bootstrap
+        // a syntactically-fine xref, reconstruct a damaged one, and
+        // repair-retry offsets that lie (issue #14). Password and I/O errors
+        // keep their meaning and propagate.
+        Err(PdfOpsError::Pdf(_)) | Err(PdfOpsError::Range(PageRangeError::NoPages)) => {
+            return split_via_lazy(input, password, outputs);
+        }
+        Err(err) => return Err(err),
+    };
+    let pages = source.get_pages();
+    // A successful eager parse can still be lossy on damaged files: lopdf
+    // (non-strict) skips objects whose xref offset points at the wrong
+    // object, silently shrinking the page tree. When the declared /Count
+    // disagrees with the walked tree, distrust the eager document and reroute
+    // through the lazy source, whose strict fetches surface the damage and
+    // drive the repair retry.
+    if eager_page_tree_is_suspect(&source, pages.len()) {
+        return split_via_lazy(input, password, outputs);
+    }
+    let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
+    reject_duplicate_output_paths(&resolved_outputs)?;
+    run_split_outputs(&source, &resolved_outputs)
+}
+
+/// Unbounded split through the lazy source: the fallback when the eager
+/// parse fails or cannot be trusted. Fetch errors that prove the xref lies
+/// re-run the split against a reconstructed table.
+fn split_via_lazy(input: &Path, password: Option<&str>, outputs: &[SplitOutput]) -> Result<()> {
+    let mmap = map_file(input)?;
+    with_repair_retry(&mmap, input, password, |source| {
+        let ordered_pages = source.page_ids()?;
         if ordered_pages.is_empty() {
             return Err(PdfOpsError::Range(PageRangeError::NoPages));
         }
         let pages: BTreeMap<u32, lopdf::ObjectId> = (1u32..).zip(ordered_pages).collect();
-        let resolved_outputs = resolve_split_outputs(outputs, &pages, true)?;
+        let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
         reject_duplicate_output_paths(&resolved_outputs)?;
-        return run_split_outputs(&source, &resolved_outputs);
-    }
+        run_split_outputs(source, &resolved_outputs)
+    })
+}
 
-    let source = load_document(input, password)?;
-    let pages = source.get_pages();
-    let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
-    reject_duplicate_output_paths(&resolved_outputs)?;
-    run_split_outputs(&source, &resolved_outputs)
+/// True when the root `/Pages` `/Count` is a direct integer that disagrees
+/// with the pages the eager document actually enumerates — the signature of
+/// lopdf's non-strict loader having skipped damaged objects. Documents
+/// without a readable direct /Count cannot be judged and are trusted as-is.
+fn eager_page_tree_is_suspect(document: &Document, walked: usize) -> bool {
+    let declared = (|| {
+        document
+            .catalog()
+            .ok()?
+            .get(b"Pages")
+            .ok()?
+            .as_reference()
+            .ok()
+            .and_then(|id| document.get_dictionary(id).ok())?
+            .get(b"Count")
+            .ok()?
+            .as_i64()
+            .ok()
+    })();
+    declared.is_some_and(|count| count != walked as i64)
 }
 
 fn resolve_split_outputs(
@@ -153,41 +213,42 @@ pub fn split_pages_with_options(
     }
 
     let mmap = map_file(input)?;
-    let source = PdfSource::open(&mmap, input, options.password.as_deref())?;
-    let pages = source.page_ids()?;
-    let page_count = pages.len();
-    if page_count == 0 {
-        return Err(PdfOpsError::Range(PageRangeError::NoPages));
-    }
-    let chunk_count = page_count.div_ceil(options.pages_per_file);
-    let width = chunk_count.to_string().len();
-    let resolved_outputs = pages
-        .chunks(options.pages_per_file)
-        .enumerate()
-        .map(|(chunk_index, chunk)| {
-            Ok(ResolvedSplitOutput {
-                path: render_output_pattern(output_pattern, chunk_index + 1, width)?,
-                page_ids: chunk.to_vec(),
-                // split-pages always prunes: emitting page subsets is its
-                // whole purpose, and pruning single-page outputs (including
-                // the one-page-document edge) is long-standing behavior.
-                prune_resources: true,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Fast path (single-page outputs only — the template writer emits exactly
-    // one page per file): serialize the objects shared by every page once,
-    // then emit only page-specific objects per output. Falls back to the
-    // generic per-output Document path whenever the template cannot be
-    // prepared.
-    if options.pages_per_file == 1 {
-        if let Some(template) = SinglePageTemplate::prepare(&source, &pages) {
-            return run_template_outputs(&source, &template, &resolved_outputs);
+    with_repair_retry(&mmap, input, options.password.as_deref(), |source| {
+        let pages = source.page_ids()?;
+        let page_count = pages.len();
+        if page_count == 0 {
+            return Err(PdfOpsError::Range(PageRangeError::NoPages));
         }
-    }
+        let chunk_count = page_count.div_ceil(options.pages_per_file);
+        let width = chunk_count.to_string().len();
+        let resolved_outputs = pages
+            .chunks(options.pages_per_file)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                Ok(ResolvedSplitOutput {
+                    path: render_output_pattern(output_pattern, chunk_index + 1, width)?,
+                    page_ids: chunk.to_vec(),
+                    // split-pages always prunes: emitting page subsets is its
+                    // whole purpose, and pruning single-page outputs (including
+                    // the one-page-document edge) is long-standing behavior.
+                    prune_resources: true,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-    run_split_outputs(&source, &resolved_outputs)
+        // Fast path (single-page outputs only — the template writer emits
+        // exactly one page per file): serialize the objects shared by every
+        // page once, then emit only page-specific objects per output. Falls
+        // back to the generic per-output Document path whenever the template
+        // cannot be prepared.
+        if options.pages_per_file == 1 {
+            if let Some(template) = SinglePageTemplate::prepare(source, &pages) {
+                return run_template_outputs(source, &template, &resolved_outputs);
+            }
+        }
+
+        run_split_outputs(source, &resolved_outputs)
+    })
 }
 
 /// Concurrent output-file writes allowed during a template split; see
