@@ -18,8 +18,18 @@ pub(crate) struct LazyPdf<'a> {
 
 impl<'a> LazyPdf<'a> {
     pub(crate) fn parse(buffer: &'a [u8], path: &Path) -> Result<Self> {
-        let document =
-            Document::load_mem_with_options(buffer, LoadOptions::with_filter(drop_object))?;
+        // Fast path: build only the xref table + trailer straight from the
+        // buffer. On any anomaly (including encrypted files) fall back to the
+        // full lopdf parse so behavior is identical to the slow path.
+        let document = match crate::xrefboot::bootstrap_document(buffer) {
+            Some(document) => document,
+            None => {
+                if std::env::var_os("PDQ_TIMING").is_some() {
+                    eprintln!("phase parse: xref bootstrap fell back to full lopdf parse");
+                }
+                Document::load_mem_with_options(buffer, LoadOptions::with_filter(drop_object))?
+            }
+        };
         if document.is_encrypted() || document.was_encrypted() {
             return Err(PdfOpsError::Unsupported(format!(
                 "encrypted PDFs are not supported: {}",
@@ -233,9 +243,9 @@ enum PageNode {
 }
 
 fn classify_page_dict(object: &Object) -> Result<PageNode> {
-    let dict = object.as_dict().map_err(|_| {
-        PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
-    })?;
+    let dict = object
+        .as_dict()
+        .map_err(|_| PdfOpsError::InvalidStructure("page tree node is not a dictionary".into()))?;
     match dict.get_type().map_err(PdfOpsError::Pdf)? {
         b"Page" => Ok(PageNode::Leaf),
         b"Pages" => {

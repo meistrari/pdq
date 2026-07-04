@@ -7,6 +7,7 @@ pub mod range;
 mod scan;
 pub mod split;
 mod write;
+mod xrefboot;
 
 pub use copy::{CopyContext, CopyOptions};
 pub use count::page_count;
