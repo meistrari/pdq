@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     copy::{copy_pages_with_options, CopyOptions},
-    lazy::LazyPdf,
+    lazy::PdfSource,
     load::map_file,
     range::{PageRangeError, PageRangeGroup},
     split::{empty_document, finish_pages},
@@ -20,9 +20,13 @@ pub struct MergeInput {
     pub ranges: Vec<PageRangeGroup>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct MergeOptions {
     pub preserve_whole_single_input: bool,
+    /// Password used to decrypt encrypted inputs. The empty user password is
+    /// always tried first, so owner-password-only files merge without this.
+    /// Outputs are always written unencrypted.
+    pub password: Option<String>,
 }
 
 impl MergeInput {
@@ -46,17 +50,18 @@ pub fn merge_with_options(
     if inputs.is_empty() {
         return Err(PdfOpsError::Range(PageRangeError::NoPages));
     }
+    let password = options.password.as_deref();
 
     if options.preserve_whole_single_input {
         if let [input] = inputs {
             if input.ranges.is_empty() && !same_file(&input.path, output)? {
-                return copy_whole_input(input, output);
+                return copy_whole_input(input, output, password);
             }
         }
     }
 
     if inputs.iter().all(|input| input.ranges.is_empty()) {
-        return merge_whole_inputs_streaming(inputs, output);
+        return merge_whole_inputs_streaming(inputs, output, password);
     }
 
     let mut target = empty_document();
@@ -64,7 +69,7 @@ pub fn merge_with_options(
 
     for input in inputs {
         let mmap = map_file(&input.path)?;
-        let source = LazyPdf::parse(&mmap, &input.path)?;
+        let source = PdfSource::open(&mmap, &input.path, password)?;
         let pages = source.page_ids()?;
         let page_ids = resolve_merge_page_ids(&pages, input)?;
         merged_pages.extend(copy_pages_with_options(
@@ -83,9 +88,37 @@ pub fn merge_with_options(
     Ok(())
 }
 
-fn merge_whole_inputs_streaming(inputs: &[MergeInput], output: &Path) -> Result<()> {
+fn merge_whole_inputs_streaming(
+    inputs: &[MergeInput],
+    output: &Path,
+    password: Option<&str>,
+) -> Result<()> {
+    write_streaming_output(output, |writer| {
+        for input in inputs {
+            let mmap = map_file(&input.path)?;
+            let source = PdfSource::open(&mmap, &input.path, password)?;
+            let page_ids = source.page_ids()?;
+            if page_ids.is_empty() {
+                return Err(PdfOpsError::Range(PageRangeError::NoPages));
+            }
+            append_whole_source(writer, &source, &page_ids)?;
+        }
+        Ok(())
+    })
+}
+
+/// Write a streaming merge output atomically: build it in a temporary file
+/// next to `output` and rename it into place on success.
+fn write_streaming_output(
+    output: &Path,
+    fill: impl FnOnce(&mut StreamingPdfWriter) -> Result<()>,
+) -> Result<()> {
     let temp_output = temp_output_path(output)?;
-    let result = merge_whole_inputs_streaming_to_path(inputs, &temp_output);
+    let result = (|| {
+        let mut writer = StreamingPdfWriter::create(&temp_output)?;
+        fill(&mut writer)?;
+        writer.finish()
+    })();
     match result {
         Ok(()) => {
             fs::rename(&temp_output, output)?;
@@ -98,31 +131,23 @@ fn merge_whole_inputs_streaming(inputs: &[MergeInput], output: &Path) -> Result<
     }
 }
 
-fn merge_whole_inputs_streaming_to_path(inputs: &[MergeInput], output: &Path) -> Result<()> {
-    let mut writer = StreamingPdfWriter::create(output)?;
-
-    for input in inputs {
-        let mmap = map_file(&input.path)?;
-        let source = LazyPdf::parse(&mmap, &input.path)?;
-        let page_ids = source.page_ids()?;
-        if page_ids.is_empty() {
-            return Err(PdfOpsError::Range(PageRangeError::NoPages));
-        }
-
-        let copied_pages = {
-            let mut context = StreamingCopyContext::new(
-                &mut writer,
-                CopyOptions {
-                    prune_resources: false,
-                    ..CopyOptions::default()
-                },
-            );
-            context.copy_pages(&source, &page_ids)?
-        };
-        writer.extend_pages(copied_pages);
-    }
-
-    writer.finish()
+fn append_whole_source(
+    writer: &mut StreamingPdfWriter,
+    source: &PdfSource<'_>,
+    page_ids: &[lopdf::ObjectId],
+) -> Result<()> {
+    let copied_pages = {
+        let mut context = StreamingCopyContext::new(
+            writer,
+            CopyOptions {
+                prune_resources: false,
+                ..CopyOptions::default()
+            },
+        );
+        context.copy_pages(source, page_ids)?
+    };
+    writer.extend_pages(copied_pages);
+    Ok(())
 }
 
 fn temp_output_path(output: &Path) -> Result<PathBuf> {
@@ -152,11 +177,21 @@ fn temp_output_path(output: &Path) -> Result<PathBuf> {
     )))
 }
 
-fn copy_whole_input(input: &MergeInput, output: &Path) -> Result<()> {
+/// Fast path for a single whole input: byte-copy it to `output`. Encrypted
+/// inputs cannot be byte-copied because outputs must always be unencrypted,
+/// so the already-decrypted source is rewritten through the streaming writer
+/// instead.
+fn copy_whole_input(input: &MergeInput, output: &Path, password: Option<&str>) -> Result<()> {
     let mmap = map_file(&input.path)?;
-    let source = LazyPdf::parse(&mmap, &input.path)?;
-    if source.page_ids()?.is_empty() {
+    let source = PdfSource::open(&mmap, &input.path, password)?;
+    let page_ids = source.page_ids()?;
+    if page_ids.is_empty() {
         return Err(PdfOpsError::Range(PageRangeError::NoPages));
+    }
+    if source.was_encrypted() {
+        return write_streaming_output(output, |writer| {
+            append_whole_source(writer, &source, &page_ids)
+        });
     }
     fs::copy(&input.path, output)?;
     Ok(())

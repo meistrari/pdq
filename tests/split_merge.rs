@@ -6,8 +6,9 @@ use std::{
 
 use lopdf::{dictionary, Dictionary, Document, Object, Stream};
 use pdq::{
-    merge, merge_with_options, page_count, split, split_pages, split_pages_with_options,
-    MergeInput, MergeOptions, PageRangeGroup, PdfOpsError, SplitOutput, SplitPagesOptions,
+    merge, merge_with_options, page_count, page_count_with_password, split, split_pages,
+    split_pages_with_options, split_pages_with_password, split_with_password, MergeInput,
+    MergeOptions, PageRangeGroup, PdfOpsError, SplitOutput, SplitPagesOptions,
 };
 use tempfile::tempdir;
 
@@ -107,6 +108,84 @@ impl QpdfValidator {
         self.check_pdf(path);
         self.assert_npages(path, expected_pages);
     }
+
+    /// Encrypt `source` into `dest` by shelling out to qpdf. Returns `false`
+    /// when qpdf is unavailable so callers can skip the test.
+    fn encrypt(
+        &self,
+        source: &Path,
+        dest: &Path,
+        user_password: &str,
+        owner_password: &str,
+        options: &[&str],
+    ) -> bool {
+        if !self.available {
+            eprintln!(
+                "qpdf unavailable; skipping encrypted fixture {}",
+                dest.display()
+            );
+            return false;
+        }
+
+        let output = Command::new("qpdf")
+            .arg("--allow-weak-crypto")
+            .arg("--encrypt")
+            .arg(user_password)
+            .arg(owner_password)
+            .args(options)
+            .arg("--")
+            .arg(source)
+            .arg(dest)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run qpdf --encrypt: {err}"));
+        assert!(
+            output.status.success(),
+            "qpdf --encrypt failed for {}\nstdout:\n{}\nstderr:\n{}",
+            dest.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    fn assert_not_encrypted(&self, path: &Path) {
+        if !self.available {
+            eprintln!(
+                "qpdf unavailable; skipping qpdf --is-encrypted for {}",
+                path.display()
+            );
+            return;
+        }
+
+        let output = Command::new("qpdf")
+            .arg("--is-encrypted")
+            .arg(path)
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "failed to run qpdf --is-encrypted {}: {err}",
+                    path.display()
+                )
+            });
+        // qpdf --is-encrypted exits 0 for encrypted files and non-zero otherwise.
+        assert!(
+            !output.status.success(),
+            "{} is unexpectedly encrypted",
+            path.display()
+        );
+    }
+}
+
+/// Assert with lopdf that `path` is written without encryption, so it also
+/// holds when qpdf is unavailable.
+fn assert_decrypted(path: &Path) {
+    let document = Document::load(path)
+        .unwrap_or_else(|err| panic!("failed to load {}: {err}", path.display()));
+    assert!(
+        !document.is_encrypted() && !document.was_encrypted(),
+        "{} should be written unencrypted",
+        path.display()
+    );
 }
 
 #[test]
@@ -254,6 +333,7 @@ fn merge_with_preserve_whole_single_input_copies_bytes() {
         &merged,
         MergeOptions {
             preserve_whole_single_input: true,
+            ..MergeOptions::default()
         },
     )
     .unwrap();
@@ -272,6 +352,7 @@ fn merge_with_preserve_whole_single_input_does_not_truncate_same_file() {
         &input,
         MergeOptions {
             preserve_whole_single_input: true,
+            ..MergeOptions::default()
         },
     )
     .unwrap();
@@ -354,7 +435,10 @@ fn split_pages_with_options_chunks_pages_and_qpdf_validates_page_counts() {
     split_pages_with_options(
         &input,
         pattern.to_str().unwrap(),
-        &SplitPagesOptions { pages_per_file: 2 },
+        &SplitPagesOptions {
+            pages_per_file: 2,
+            ..SplitPagesOptions::default()
+        },
     )
     .unwrap();
 
@@ -377,7 +461,10 @@ fn split_pages_with_options_larger_than_page_count_writes_single_output() {
     split_pages_with_options(
         &input,
         pattern.to_str().unwrap(),
-        &SplitPagesOptions { pages_per_file: 9 },
+        &SplitPagesOptions {
+            pages_per_file: 9,
+            ..SplitPagesOptions::default()
+        },
     )
     .unwrap();
 
@@ -395,7 +482,10 @@ fn split_pages_with_options_rejects_zero_pages_per_file() {
     let error = split_pages_with_options(
         &fixture("11-pages.pdf"),
         pattern.to_str().unwrap(),
-        &SplitPagesOptions { pages_per_file: 0 },
+        &SplitPagesOptions {
+            pages_per_file: 0,
+            ..SplitPagesOptions::default()
+        },
     )
     .unwrap_err();
 
@@ -414,7 +504,10 @@ fn split_pages_with_options_pads_numbers_to_chunk_count_width() {
     split_pages_with_options(
         &input,
         per_page_pattern.to_str().unwrap(),
-        &SplitPagesOptions { pages_per_file: 1 },
+        &SplitPagesOptions {
+            pages_per_file: 1,
+            ..SplitPagesOptions::default()
+        },
     )
     .unwrap();
     for page in 1..=12 {
@@ -425,7 +518,10 @@ fn split_pages_with_options_pads_numbers_to_chunk_count_width() {
     split_pages_with_options(
         &input,
         chunk_pattern.to_str().unwrap(),
-        &SplitPagesOptions { pages_per_file: 5 },
+        &SplitPagesOptions {
+            pages_per_file: 5,
+            ..SplitPagesOptions::default()
+        },
     )
     .unwrap();
 
@@ -436,6 +532,33 @@ fn split_pages_with_options_pads_numbers_to_chunk_count_width() {
         qpdf.validate(&path, expected_pages);
     }
     assert!(!temp.path().join("chunk-4.pdf").exists());
+}
+
+#[test]
+fn split_pages_with_options_chunks_and_decrypts_user_password_input() {
+    let temp = tempdir().unwrap();
+    let pattern = temp.path().join("chunk-%d.pdf");
+
+    // pages_per_file and password must compose: chunk while decrypting.
+    split_pages_with_options(
+        &fixture("user-password.pdf"),
+        pattern.to_str().unwrap(),
+        &SplitPagesOptions {
+            pages_per_file: 3,
+            password: Some("user".to_string()),
+        },
+    )
+    .unwrap();
+
+    let qpdf = QpdfValidator::detect();
+    for (chunk, expected_pages) in [(1, 3), (2, 3), (3, 3), (4, 2)] {
+        let path = temp.path().join(format!("chunk-{chunk}.pdf"));
+        assert_written(&path);
+        assert_decrypted(&path);
+        qpdf.validate(&path, expected_pages);
+        qpdf.assert_not_encrypted(&path);
+    }
+    assert!(!temp.path().join("chunk-5.pdf").exists());
 }
 
 #[test]
@@ -577,7 +700,7 @@ fn split_pages_keeps_page_font_used_by_form_without_resources() {
 }
 
 #[test]
-fn split_rejects_encrypted_inputs_with_unsupported_error() {
+fn split_requires_password_for_user_password_inputs() {
     let temp = tempdir().unwrap();
     let output = temp.path().join("should-not-exist.pdf");
 
@@ -590,30 +713,259 @@ fn split_rejects_encrypted_inputs_with_unsupported_error() {
     )
     .unwrap_err();
 
-    assert!(matches!(error, PdfOpsError::Unsupported(_)));
+    assert!(matches!(error, PdfOpsError::Password(_)));
+    assert!(
+        error.to_string().contains("--password"),
+        "error should point at --password: {error}"
+    );
     assert!(!output.exists());
 }
 
 #[test]
-fn split_pages_rejects_encrypted_inputs_with_unsupported_error() {
+fn split_pages_requires_password_for_user_password_inputs() {
     let temp = tempdir().unwrap();
     let pattern = temp.path().join("should-not-exist-%d.pdf");
 
     let error = split_pages(&fixture("user-password.pdf"), pattern.to_str().unwrap()).unwrap_err();
 
-    assert!(matches!(error, PdfOpsError::Unsupported(_)));
+    assert!(matches!(error, PdfOpsError::Password(_)));
+    assert!(
+        error.to_string().contains("--password"),
+        "error should point at --password: {error}"
+    );
     assert!(!temp.path().join("should-not-exist-1.pdf").exists());
 }
 
 #[test]
-fn merge_rejects_owner_only_encrypted_inputs_with_unsupported_error() {
+fn split_pages_rejects_wrong_password_with_invalid_password_error() {
     let temp = tempdir().unwrap();
-    let output = temp.path().join("should-not-exist.pdf");
+    let pattern = temp.path().join("should-not-exist-%d.pdf");
 
-    let error = merge(&[MergeInput::all(fixture("owner-only.pdf"))], &output).unwrap_err();
+    let error = split_pages_with_password(
+        &fixture("user-password.pdf"),
+        pattern.to_str().unwrap(),
+        Some("wrong"),
+    )
+    .unwrap_err();
 
-    assert!(matches!(error, PdfOpsError::Unsupported(_)));
-    assert!(!output.exists());
+    assert!(matches!(error, PdfOpsError::Password(_)));
+    assert!(
+        error.to_string().contains("invalid password"),
+        "error should report an invalid password: {error}"
+    );
+    assert!(!temp.path().join("should-not-exist-1.pdf").exists());
+}
+
+#[test]
+fn page_count_reads_owner_only_encrypted_input_without_password() {
+    assert_eq!(page_count(&fixture("owner-only.pdf")).unwrap(), 11);
+}
+
+#[test]
+fn page_count_with_password_reads_user_password_input() {
+    assert_eq!(
+        page_count_with_password(&fixture("user-password.pdf"), Some("user")).unwrap(),
+        11
+    );
+}
+
+#[test]
+fn split_with_password_decrypts_user_password_input() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("decrypted-1-3.pdf");
+
+    split_with_password(
+        &fixture("user-password.pdf"),
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-3").unwrap(),
+            path: output.clone(),
+        }],
+        Some("user"),
+    )
+    .unwrap();
+
+    assert_written(&output);
+    assert_decrypted(&output);
+    let qpdf = QpdfValidator::detect();
+    qpdf.validate(&output, 3);
+    qpdf.assert_not_encrypted(&output);
+}
+
+#[test]
+fn split_pages_decrypts_owner_only_encrypted_input_without_password() {
+    let temp = tempdir().unwrap();
+    let pattern = temp.path().join("owner-only-%d.pdf");
+
+    split_pages(&fixture("owner-only.pdf"), pattern.to_str().unwrap()).unwrap();
+
+    let qpdf = QpdfValidator::detect();
+    for page in 1..=11 {
+        let path = temp.path().join(format!("owner-only-{page:02}.pdf"));
+        assert_written(&path);
+        assert_decrypted(&path);
+        qpdf.validate(&path, 1);
+        qpdf.assert_not_encrypted(&path);
+    }
+}
+
+#[test]
+fn merge_decrypts_owner_only_encrypted_input_without_password() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("merged.pdf");
+
+    merge(
+        &[
+            MergeInput::all(fixture("owner-only.pdf")),
+            MergeInput::all(fixture("11-pages.pdf")),
+        ],
+        &output,
+    )
+    .unwrap();
+
+    assert_written(&output);
+    assert_decrypted(&output);
+    let qpdf = QpdfValidator::detect();
+    qpdf.validate(&output, 22);
+    qpdf.assert_not_encrypted(&output);
+}
+
+#[test]
+fn merge_preserve_whole_single_encrypted_input_rewrites_decrypted() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("merged.pdf");
+
+    // The byte-copy fast path must not apply: it would keep the output
+    // encrypted, while outputs are always written decrypted.
+    merge_with_options(
+        &[MergeInput::all(fixture("owner-only.pdf"))],
+        &output,
+        MergeOptions {
+            preserve_whole_single_input: true,
+            ..MergeOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_written(&output);
+    assert_decrypted(&output);
+    let qpdf = QpdfValidator::detect();
+    qpdf.validate(&output, 11);
+    qpdf.assert_not_encrypted(&output);
+}
+
+#[test]
+fn merge_with_password_merges_ranges_from_user_password_input() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("merged-ranges.pdf");
+
+    merge_with_options(
+        &[MergeInput {
+            path: fixture("user-password.pdf"),
+            ranges: vec![PageRangeGroup::parse("1-2").unwrap()],
+        }],
+        &output,
+        MergeOptions {
+            password: Some("user".to_string()),
+            ..MergeOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_written(&output);
+    assert_decrypted(&output);
+    let qpdf = QpdfValidator::detect();
+    qpdf.validate(&output, 2);
+    qpdf.assert_not_encrypted(&output);
+}
+
+#[test]
+fn split_pages_decrypts_aes128_encrypted_input() {
+    let qpdf = QpdfValidator::detect();
+    let temp = tempdir().unwrap();
+    let encrypted = temp.path().join("aes128.pdf");
+    if !qpdf.encrypt(
+        &fixture("11-pages.pdf"),
+        &encrypted,
+        "",
+        "ownerpw",
+        &["128", "--use-aes=y"],
+    ) {
+        return;
+    }
+
+    let pattern = temp.path().join("aes128-%d.pdf");
+    split_pages(&encrypted, pattern.to_str().unwrap()).unwrap();
+
+    for page in 1..=11 {
+        let path = temp.path().join(format!("aes128-{page:02}.pdf"));
+        assert_written(&path);
+        assert_decrypted(&path);
+        qpdf.validate(&path, 1);
+        qpdf.assert_not_encrypted(&path);
+    }
+}
+
+#[test]
+fn split_decrypts_rc4_encrypted_input() {
+    let qpdf = QpdfValidator::detect();
+    let temp = tempdir().unwrap();
+    let encrypted = temp.path().join("rc4.pdf");
+    if !qpdf.encrypt(
+        &fixture("11-pages.pdf"),
+        &encrypted,
+        "",
+        "ownerpw",
+        &["128", "--use-aes=n"],
+    ) {
+        return;
+    }
+
+    let output = temp.path().join("rc4-1-3.pdf");
+    split(
+        &encrypted,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1-3").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    assert_written(&output);
+    assert_decrypted(&output);
+    qpdf.validate(&output, 3);
+    qpdf.assert_not_encrypted(&output);
+}
+
+#[test]
+fn merge_with_password_decrypts_aes256_user_password_input() {
+    let qpdf = QpdfValidator::detect();
+    let temp = tempdir().unwrap();
+    let encrypted = temp.path().join("aes256-user.pdf");
+    if !qpdf.encrypt(
+        &fixture("11-pages.pdf"),
+        &encrypted,
+        "userpw",
+        "ownerpw",
+        &["256"],
+    ) {
+        return;
+    }
+
+    let output = temp.path().join("merged.pdf");
+    merge_with_options(
+        &[MergeInput::all(&encrypted)],
+        &output,
+        MergeOptions {
+            password: Some("userpw".to_string()),
+            ..MergeOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_written(&output);
+    assert_decrypted(&output);
+    qpdf.validate(&output, 11);
+    qpdf.assert_not_encrypted(&output);
 }
 
 #[test]
