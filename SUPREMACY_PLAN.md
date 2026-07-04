@@ -103,16 +103,54 @@ Ordered by leverage/effort:
    skip-scan when the page's resource dict is document-global; keeps the
    README's real-PDF wins while avoiding decode_strict on hot paths.
 
-## Current standing after this worktree's prototype
+## Final standing (measured 2026-07-03, after items #1–#3 + lean split outputs)
 
-| scenario (12k objstm) | pdq before | pdq now | qpdf | after #1–#3 (est.) |
+Final shootout on `big-c.pdf` (12,000 pages, object streams; merge adds
+`small-c.pdf`, 2,500 pages). hyperfine mean ± σ, warmup 1 / 5 runs (count:
+warmup 2 / 10 runs). All outputs validated: expected page counts plus
+`qpdf --warning-exit-0 --check` on the rewrite/range/merge outputs and split
+pages 1 / 6000 / 12000.
+
+| scenario (12k objstm) | pdq before | pdq after | qpdf | vs qpdf |
 | --- | ---: | ---: | ---: | ---: |
-| page-count | 46 ms | 42 ms | 9 ms | **~5–8 ms** |
-| split-pages | 1.14 s | 1.09 s | 0.98 s | **~0.6–0.8 s** |
-| rewrite | 82 ms (wins) | — | 114 ms | — |
-| range | 34 ms (ties MuPDF) | — | 48 ms | — |
-| merge | 113 ms (wins) | — | 200 ms | — |
+| page-count | 46.3 ms | **6.8 ms ± 0.9** | 8.7 ms ± 0.6 | 1.27× ± 0.19 faster |
+| page-count `--strict` (validated walk) | 46.3 ms | 30.0 ms ± 0.7 | n/a (qpdf trusts `/Count`) | — |
+| split-pages (12k files) | 1.136 s | **403 ms ± 42** | 929 ms ± 15 | 2.30× ± 0.24 faster |
+| rewrite (copy all pages) | 82.0 ms | **85.5 ms ± 5.1** | 106.2 ms ± 3.0 | 1.24× ± 0.08 faster |
+| range 5000–5100 | 33.7 ms | **31.3 ms ± 0.9** | 46.3 ms ± 2.1 | 1.48× ± 0.11 faster |
+| merge 12k + 2.5k | 113.3 ms | **109.8 ms ± 5.0** | 203.3 ms ± 13.4 | 1.85× ± 0.15 faster |
 
-pdq already leads merge/rewrite/range. Items #1–#3 are enough to take count
-and split on clean inputs; #4–#5 turn split into the same kind of blowout the
-README shows on pathological real-world files.
+MuPDF (mutool), where it competes: count 29.9 ms ± 0.7, rewrite (clean)
+98.0 ms ± 1.4, range (merge) **29.6 ms ± 0.5**, merge 5.15 s ± 0.08.
+
+## Outcome
+
+**Met** — pdq beats qpdf in all five scenarios on this corpus:
+
+- **count** flipped from a 5.3× loss to a 1.27× win. The win comes from the
+  xref-only bootstrap (no discarded full parse) plus matching qpdf's
+  semantics: the default now trusts the root `/Pages /Count` exactly like
+  `qpdf --show-npages`. The old validated walk survives as `--strict`
+  (30 ms) and kicks in automatically when `/Count` is missing/implausible.
+- **split-pages** flipped from a 1.16× loss to a 2.30× win (xref-only
+  bootstrap + Arc cache for normal objects + lean per-output writing).
+- **rewrite, range, merge** kept their pre-existing wins over qpdf (no
+  regression outside noise: rewrite 82.0→85.5 ms is within run-to-run σ and
+  still ahead of both qpdf and mutool).
+
+**Not met / caveats**:
+
+- **Range vs MuPDF**: mutool merge measured 1.06× ± 0.03 ahead of pdq in the
+  final run (29.6 vs 31.3 ms; previously a statistical tie at 1.01× ± 0.10).
+  pdq is not the fastest tool tested at range extraction — only faster than
+  qpdf there.
+- **Strict counting** (the guarantee pdq used to give by default) is 30 ms —
+  qpdf offers no equivalent validated mode, so there is no direct comparison,
+  but users who opt into `--strict` wait longer than qpdf's trusting answer.
+- **Synthetic-clean corpus only**: uniform pages, flat tree, no damaged
+  xrefs. The README's original headline wins came from real-world messy PDFs
+  where qpdf/Poppler degrade; that axis was not re-tested here (no such files
+  in the repo). These numbers prove clean-input parity+lead, not universal
+  supremacy.
+- Single machine (Apple M4 Max, macOS/arm64), qpdf 12.3.2, mutool 1.28.0.
+  RSS was not re-measured in the final round.

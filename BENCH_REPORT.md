@@ -2,9 +2,19 @@
 
 Question: is pdq the fastest PDF library in the world?
 
-**Verdict: no across the board — but it is the fastest tool tested at merge and
-full rewrite, and ties MuPDF at range extraction. qpdf beats it at page-count
-(5.3×) and single-page split (1.16×) on clean synthetic inputs.**
+**Verdict (updated after the supremacy work, 2026-07-03): pdq now beats qpdf
+in all five scenarios on this synthetic-clean corpus — count 1.27×, split
+2.30×, rewrite 1.24×, range 1.48×, merge 1.85× — and is the fastest tool
+tested everywhere except range extraction, where MuPDF is marginally ahead
+(1.06× ± 0.03). The count win matches qpdf's trust-the-`/Count` semantics;
+the validated walk is now `--strict`. Final numbers and caveats:
+SUPREMACY_PLAN.md. The tables below record the pre-optimization baseline at
+commit `0d32b7e`.**
+
+Original verdict (baseline run): no across the board — but it is the fastest
+tool tested at merge and full rewrite, and ties MuPDF at range extraction.
+qpdf beats it at page-count (5.3×) and single-page split (1.16×) on clean
+synthetic inputs.
 
 ## Setup
 
