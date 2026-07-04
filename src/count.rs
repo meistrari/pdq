@@ -12,6 +12,10 @@ use crate::{load::map_file, repair::with_repair_retry, Result};
 /// password require [`page_count_with_password`].
 ///
 /// Returns `0` for a structurally valid PDF that declares no pages.
+///
+/// Duplicate/shared page kids are counted as distinct page occurrences. True
+/// ancestor cycles remain a hard structural error instead of qpdf's
+/// warn-and-stop behavior, so callers never get a silently partial count.
 pub fn page_count(input: &Path) -> Result<usize> {
     page_count_with_password(input, None)
 }

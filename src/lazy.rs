@@ -277,8 +277,10 @@ impl<'a> LazyPdf<'a> {
     /// Walk the page tree in document order, invoking `on_page` for each leaf
     /// `/Page` object. The single source of truth for "which objects are pages",
     /// shared by `page_ids` (collect) and `count_pages` (count). Guards against
-    /// malformed/adversarial trees via cycle detection, a depth cap, and an
-    /// object-visit cap.
+    /// malformed/adversarial trees via ancestor-cycle detection and a depth
+    /// cap. Duplicate/shared kids are valid PDF shapes and count as distinct
+    /// occurrences; only a node repeated in its current ancestor path is a
+    /// hard page-tree cycle.
     fn walk_pages(&self, mut on_page: impl FnMut(ObjectId)) -> Result<()> {
         self.walk_pages_until(|id| {
             on_page(id);
@@ -304,17 +306,13 @@ impl<'a> LazyPdf<'a> {
             .and_then(Object::as_reference)
             .map_err(PdfOpsError::Pdf)?;
 
-        let mut stack = vec![(pages_id, 0usize)];
-        let mut visited = BTreeSet::new();
-        let max_iters = self
-            .reader
-            .document
-            .reference_table
-            .entries
-            .len()
-            .saturating_mul(2)
-            .max(1);
-        let mut iters = 0usize;
+        enum WalkFrame {
+            Enter(ObjectId, usize),
+            Exit(ObjectId),
+        }
+
+        let mut stack = vec![WalkFrame::Enter(pages_id, 0usize)];
+        let mut ancestors = BTreeSet::new();
 
         // Borrowing the current object-stream container keeps the hot path
         // clone-free: consecutive page objects usually live in the same
@@ -322,33 +320,36 @@ impl<'a> LazyPdf<'a> {
         // out of the cache (which dominated large-document walks).
         let mut current_container: Option<(u32, Arc<BTreeMap<ObjectId, Object>>)> = None;
 
-        while let Some((id, depth)) = stack.pop() {
-            iters += 1;
-            if iters > max_iters {
-                return Err(PdfOpsError::InvalidStructure(
-                    "page tree traversal exceeded object limit".into(),
-                ));
-            }
-            if depth > 256 {
-                return Err(PdfOpsError::InvalidStructure(
-                    "page tree exceeds maximum depth".into(),
-                ));
-            }
-            if !visited.insert(id) {
-                return Err(PdfOpsError::InvalidStructure(
-                    "cycle detected in page tree".into(),
-                ));
-            }
-
-            match self.classify_page_node(id, &mut current_container)? {
-                PageNode::Leaf => {
-                    if !on_page(id) {
-                        return Ok(());
-                    }
+        while let Some(frame) = stack.pop() {
+            match frame {
+                WalkFrame::Exit(id) => {
+                    ancestors.remove(&id);
                 }
-                PageNode::Interior(kids) => {
-                    for kid_id in kids.into_iter().rev() {
-                        stack.push((kid_id, depth + 1));
+                WalkFrame::Enter(id, depth) => {
+                    if depth > 256 {
+                        return Err(PdfOpsError::InvalidStructure(
+                            "page tree exceeds maximum depth".into(),
+                        ));
+                    }
+                    if !ancestors.insert(id) {
+                        return Err(PdfOpsError::InvalidStructure(
+                            "cycle detected in page tree".into(),
+                        ));
+                    }
+
+                    match self.classify_page_node(id, &mut current_container)? {
+                        PageNode::Leaf => {
+                            ancestors.remove(&id);
+                            if !on_page(id) {
+                                return Ok(());
+                            }
+                        }
+                        PageNode::Interior(kids) => {
+                            stack.push(WalkFrame::Exit(id));
+                            for kid_id in kids.into_iter().rev() {
+                                stack.push(WalkFrame::Enter(kid_id, depth + 1));
+                            }
+                        }
                     }
                 }
             }
