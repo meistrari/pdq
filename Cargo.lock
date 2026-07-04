@@ -1031,6 +1031,7 @@ dependencies = [
  "flate2",
  "hayro",
  "lopdf",
+ "memchr",
  "memmap2",
  "predicates",
  "rayon",

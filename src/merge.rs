@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process,
@@ -9,6 +10,7 @@ use crate::{
     lazy::PdfSource,
     load::map_file,
     range::{PageRangeError, PageRangeGroup},
+    repair::{is_offset_damage, with_repair_retry},
     split::{empty_document, finish_pages},
     write::{StreamingCopyContext, StreamingPdfWriter},
     PdfOpsError, Result,
@@ -64,28 +66,68 @@ pub fn merge_with_options(
         return merge_whole_inputs_streaming(inputs, output, password);
     }
 
-    let mut target = empty_document();
-    let mut merged_pages = Vec::new();
+    // A fetch error that proves an input's xref lies restarts the merge with
+    // that input force-repaired (the in-progress target document is tainted
+    // by the failed copy). Each restart adds one input to the repair set, so
+    // the loop is bounded by the input count.
+    let mut force_repair: BTreeSet<usize> = BTreeSet::new();
+    'attempt: loop {
+        let mut target = empty_document();
+        let mut merged_pages = Vec::new();
 
-    for input in inputs {
-        let mmap = map_file(&input.path)?;
-        let source = PdfSource::open(&mmap, &input.path, password)?;
-        let pages = source.page_ids()?;
-        let page_ids = resolve_merge_page_ids(&pages, input)?;
-        merged_pages.extend(copy_pages_with_options(
-            &source,
-            &mut target,
-            &page_ids,
-            CopyOptions {
-                prune_resources: !input.ranges.is_empty(),
-                ..CopyOptions::default()
-            },
-        )?);
+        for (index, input) in inputs.iter().enumerate() {
+            let mmap = map_file(&input.path)?;
+            let source =
+                open_merge_source(&mmap, &input.path, password, force_repair.contains(&index))?;
+            let copied = (|| {
+                let pages = source.page_ids()?;
+                let page_ids = resolve_merge_page_ids(&pages, input)?;
+                copy_pages_with_options(
+                    &source,
+                    &mut target,
+                    &page_ids,
+                    CopyOptions {
+                        prune_resources: !input.ranges.is_empty(),
+                        ..CopyOptions::default()
+                    },
+                )
+            })();
+            match copied {
+                Ok(pages) => merged_pages.extend(pages),
+                Err(err) if is_offset_damage(&err) && !source.repaired() => {
+                    force_repair.insert(index);
+                    continue 'attempt;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        finish_pages(&mut target, &merged_pages)?;
+        target.save(output)?;
+        return Ok(());
     }
+}
 
-    finish_pages(&mut target, &merged_pages)?;
-    target.save(output)?;
-    Ok(())
+/// Open one merge input, forcing xref reconstruction for inputs a previous
+/// attempt proved damaged. A forced reconstruction that fails is a hard
+/// error: the damage is already established, there is nothing to fall back
+/// to.
+fn open_merge_source<'a>(
+    buffer: &'a [u8],
+    path: &Path,
+    password: Option<&str>,
+    force_repair: bool,
+) -> Result<PdfSource<'a>> {
+    if force_repair {
+        PdfSource::open_repaired(buffer, path).ok_or_else(|| {
+            PdfOpsError::InvalidStructure(format!(
+                "{}: damaged cross-reference data; automatic repair failed",
+                path.display()
+            ))
+        })
+    } else {
+        PdfSource::open(buffer, path, password)
+    }
 }
 
 fn merge_whole_inputs_streaming(
@@ -93,18 +135,41 @@ fn merge_whole_inputs_streaming(
     output: &Path,
     password: Option<&str>,
 ) -> Result<()> {
-    write_streaming_output(output, |writer| {
-        for input in inputs {
-            let mmap = map_file(&input.path)?;
-            let source = PdfSource::open(&mmap, &input.path, password)?;
-            let page_ids = source.page_ids()?;
-            if page_ids.is_empty() {
-                return Err(PdfOpsError::Range(PageRangeError::NoPages));
+    // Same restart discipline as the ranged merge above: a lying xref aborts
+    // the streaming write (its temp file is discarded) and the whole merge
+    // re-runs with the failing input force-repaired.
+    let mut force_repair: BTreeSet<usize> = BTreeSet::new();
+    loop {
+        let mut failed_index = None;
+        let result = write_streaming_output(output, |writer| {
+            for (index, input) in inputs.iter().enumerate() {
+                let mmap = map_file(&input.path)?;
+                let source =
+                    open_merge_source(&mmap, &input.path, password, force_repair.contains(&index))?;
+                let appended = (|| {
+                    let page_ids = source.page_ids()?;
+                    if page_ids.is_empty() {
+                        return Err(PdfOpsError::Range(PageRangeError::NoPages));
+                    }
+                    append_whole_source(writer, &source, &page_ids)
+                })();
+                if let Err(err) = appended {
+                    if !source.repaired() {
+                        failed_index = Some(index);
+                    }
+                    return Err(err);
+                }
             }
-            append_whole_source(writer, &source, &page_ids)?;
+            Ok(())
+        });
+        match result {
+            Err(err) if is_offset_damage(&err) => match failed_index {
+                Some(index) if force_repair.insert(index) => continue,
+                _ => return Err(err),
+            },
+            result => return result,
         }
-        Ok(())
-    })
+    }
 }
 
 /// Write a streaming merge output atomically: build it in a temporary file
@@ -179,22 +244,24 @@ fn temp_output_path(output: &Path) -> Result<PathBuf> {
 
 /// Fast path for a single whole input: byte-copy it to `output`. Encrypted
 /// inputs cannot be byte-copied because outputs must always be unencrypted,
-/// so the already-decrypted source is rewritten through the streaming writer
-/// instead.
+/// and repaired inputs cannot either — a byte copy would faithfully preserve
+/// the damaged xref the repair just worked around — so both are rewritten
+/// through the streaming writer instead.
 fn copy_whole_input(input: &MergeInput, output: &Path, password: Option<&str>) -> Result<()> {
     let mmap = map_file(&input.path)?;
-    let source = PdfSource::open(&mmap, &input.path, password)?;
-    let page_ids = source.page_ids()?;
-    if page_ids.is_empty() {
-        return Err(PdfOpsError::Range(PageRangeError::NoPages));
-    }
-    if source.was_encrypted() {
-        return write_streaming_output(output, |writer| {
-            append_whole_source(writer, &source, &page_ids)
-        });
-    }
-    fs::copy(&input.path, output)?;
-    Ok(())
+    with_repair_retry(&mmap, &input.path, password, |source| {
+        let page_ids = source.page_ids()?;
+        if page_ids.is_empty() {
+            return Err(PdfOpsError::Range(PageRangeError::NoPages));
+        }
+        if source.was_encrypted() || source.repaired() {
+            return write_streaming_output(output, |writer| {
+                append_whole_source(writer, source, &page_ids)
+            });
+        }
+        fs::copy(&input.path, output)?;
+        Ok(())
+    })
 }
 
 #[cfg(unix)]

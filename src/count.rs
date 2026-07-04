@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::{lazy::PdfSource, load::map_file, Result};
+use crate::{load::map_file, repair::with_repair_retry, Result};
 
 /// Count the pages in a PDF by walking the page tree (validated count).
 ///
@@ -45,19 +45,22 @@ fn count_impl(input: &Path, password: Option<&str>, strict: bool) -> Result<usiz
     let timing = std::env::var_os("PDQ_TIMING").is_some();
     let start = std::time::Instant::now();
     let mmap = map_file(input)?;
-    let source = PdfSource::open(&mmap, input, password)?;
-    if timing {
-        eprintln!("phase parse: {:?}", start.elapsed());
-    }
-    let count_start = std::time::Instant::now();
-    let count = if strict {
-        source.count_pages()
-    } else {
-        source.count_pages_fast()
-    };
-    if timing {
-        let phase = if strict { "walk" } else { "count" };
-        eprintln!("phase {phase}: {:?}", count_start.elapsed());
-    }
-    count
+    // Damaged inputs whose xref lies about offsets get one retry against a
+    // reconstructed table; the closure re-runs (and re-logs) in that case.
+    with_repair_retry(&mmap, input, password, |source| {
+        if timing {
+            eprintln!("phase parse: {:?}", start.elapsed());
+        }
+        let count_start = std::time::Instant::now();
+        let count = if strict {
+            source.count_pages()
+        } else {
+            source.count_pages_fast()
+        };
+        if timing {
+            let phase = if strict { "walk" } else { "count" };
+            eprintln!("phase {phase}: {:?}", count_start.elapsed());
+        }
+        count
+    })
 }
