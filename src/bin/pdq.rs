@@ -20,6 +20,8 @@ enum Command {
     SplitPages(SplitPagesArgs),
     Merge(MergeArgs),
     PageCount(PageCountArgs),
+    #[cfg(feature = "render")]
+    Render(RenderArgs),
 }
 
 #[derive(Debug, Args)]
@@ -52,6 +54,21 @@ struct PageCountArgs {
     input: PathBuf,
 }
 
+#[cfg(feature = "render")]
+#[derive(Debug, Args)]
+struct RenderArgs {
+    input: PathBuf,
+
+    #[arg(short, long, value_name = "PATTERN")]
+    output: String,
+
+    #[arg(long, default_value_t = 150.0)]
+    dpi: f32,
+
+    #[arg(long, value_name = "RANGES")]
+    pages: Option<String>,
+}
+
 fn main() -> ExitCode {
     if let Err(err) = run() {
         eprintln!("error: {err}");
@@ -82,6 +99,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::PageCount(args) => {
             let count = page_count(&args.input)?;
             println!("{count}");
+        }
+        #[cfg(feature = "render")]
+        Command::Render(args) => {
+            let options = pdq::RenderOptions {
+                dpi: args.dpi,
+                pages: args.pages.map(PageRangeGroup::parse).transpose()?,
+            };
+            pdq::render_pages(&args.input, &args.output, &options)?;
         }
     }
     Ok(())
