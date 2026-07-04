@@ -12,7 +12,17 @@ use crate::{lazy::LazyPdf, load::map_file, Result};
 ///
 /// Returns `0` for a structurally valid PDF that declares no pages.
 pub fn page_count(input: &Path) -> Result<usize> {
+    let timing = std::env::var_os("PDQ_TIMING").is_some();
+    let start = std::time::Instant::now();
     let mmap = map_file(input)?;
     let source = LazyPdf::parse(&mmap, input)?;
-    source.count_pages()
+    if timing {
+        eprintln!("phase parse: {:?}", start.elapsed());
+    }
+    let walk_start = std::time::Instant::now();
+    let count = source.count_pages();
+    if timing {
+        eprintln!("phase walk:  {:?}", walk_start.elapsed());
+    }
+    count
 }

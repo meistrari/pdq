@@ -90,6 +90,12 @@ impl<'a> LazyPdf<'a> {
             .max(1);
         let mut iters = 0usize;
 
+        // Borrowing the current object-stream container keeps the hot path
+        // clone-free: consecutive page objects usually live in the same
+        // container, so we hold its Arc instead of cloning every node dict
+        // out of the cache (which dominated large-document walks).
+        let mut current_container: Option<(u32, Arc<BTreeMap<ObjectId, Object>>)> = None;
+
         while let Some((id, depth)) = stack.pop() {
             iters += 1;
             if iters > max_iters {
@@ -108,28 +114,54 @@ impl<'a> LazyPdf<'a> {
                 ));
             }
 
-            let object = self.get_owned(id)?;
-            let dict = object.as_dict().map_err(|_| {
-                PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
-            })?;
-            match dict.get_type().map_err(PdfOpsError::Pdf)? {
-                b"Page" => on_page(id),
-                b"Pages" => {
-                    let kids = dict
-                        .get(b"Kids")
-                        .and_then(Object::as_array)
-                        .map_err(PdfOpsError::Pdf)?;
-                    for kid in kids.iter().rev() {
-                        if let Ok(kid_id) = kid.as_reference() {
-                            stack.push((kid_id, depth + 1));
-                        }
+            match self.classify_page_node(id, &mut current_container)? {
+                PageNode::Leaf => on_page(id),
+                PageNode::Interior(kids) => {
+                    for kid_id in kids.into_iter().rev() {
+                        stack.push((kid_id, depth + 1));
                     }
                 }
-                _ => {}
+                PageNode::Other => {}
             }
         }
 
         Ok(())
+    }
+
+    /// Classify a page-tree node without cloning it out of the object-stream
+    /// cache: compressed nodes are borrowed from their container map, plain
+    /// nodes are parsed once from the raw buffer.
+    fn classify_page_node(
+        &self,
+        id: ObjectId,
+        current_container: &mut Option<(u32, Arc<BTreeMap<ObjectId, Object>>)>,
+    ) -> Result<PageNode> {
+        if let Some(XrefEntry::Compressed { container, .. }) =
+            self.reader.document.reference_table.get(id.0)
+        {
+            let container = *container;
+            let objects = match current_container {
+                Some((cached, objects)) if *cached == container => Arc::clone(objects),
+                _ => {
+                    let objects = self
+                        .container_objects(container)
+                        .map_err(|err| PdfOpsError::Pdf(normalize_missing_xref(err, id)))?;
+                    *current_container = Some((container, Arc::clone(&objects)));
+                    objects
+                }
+            };
+            let object = objects
+                .get(&(id.0, 0))
+                .ok_or(PdfOpsError::Pdf(lopdf::Error::ObjectNotFound(id)))?;
+            return classify_page_dict(object);
+        }
+
+        let mut already_seen = HashSet::new();
+        let object = self
+            .reader
+            .get_object(id, &mut already_seen)
+            .map_err(|err| PdfOpsError::Pdf(normalize_missing_xref(err, id)))?;
+        classify_page_dict(&object)
     }
 
     fn get_owned(&self, id: ObjectId) -> Result<Object> {
@@ -138,32 +170,37 @@ impl<'a> LazyPdf<'a> {
             .map_err(PdfOpsError::Pdf)
     }
 
-    fn get_compressed_object(
+    fn container_objects(
         &self,
-        id: ObjectId,
         container: u32,
-    ) -> std::result::Result<Object, lopdf::Error> {
+    ) -> std::result::Result<Arc<BTreeMap<ObjectId, Object>>, lopdf::Error> {
         let cached_objects = {
             self.object_streams
                 .lock()
                 .expect("object stream cache mutex poisoned")
                 .get(container)
         };
-        let objects = if let Some(objects) = cached_objects {
-            objects
-        } else {
-            let container_id = (container, 0);
-            let mut already_seen = HashSet::new();
-            let container_object = self.reader.get_object(container_id, &mut already_seen)?;
-            let mut container_stream = container_object.as_stream()?.clone();
-            let object_stream = Arc::new(ObjectStream::new(&mut container_stream)?.objects);
-            self.object_streams
-                .lock()
-                .expect("object stream cache mutex poisoned")
-                .insert(container, Arc::clone(&object_stream));
-            object_stream
-        };
-        objects
+        if let Some(objects) = cached_objects {
+            return Ok(objects);
+        }
+        let container_id = (container, 0);
+        let mut already_seen = HashSet::new();
+        let container_object = self.reader.get_object(container_id, &mut already_seen)?;
+        let mut container_stream = container_object.as_stream()?.clone();
+        let object_stream = Arc::new(ObjectStream::new(&mut container_stream)?.objects);
+        self.object_streams
+            .lock()
+            .expect("object stream cache mutex poisoned")
+            .insert(container, Arc::clone(&object_stream));
+        Ok(object_stream)
+    }
+
+    fn get_compressed_object(
+        &self,
+        id: ObjectId,
+        container: u32,
+    ) -> std::result::Result<Object, lopdf::Error> {
+        self.container_objects(container)?
             .get(&(id.0, 0))
             .cloned()
             .ok_or(lopdf::Error::MissingXrefEntry)
@@ -186,6 +223,33 @@ impl ObjectSource for LazyPdf<'_> {
             .get_object(id, &mut already_seen)
             .map(Cow::Owned)
             .map_err(|err| normalize_missing_xref(err, id))
+    }
+}
+
+enum PageNode {
+    Leaf,
+    Interior(Vec<ObjectId>),
+    Other,
+}
+
+fn classify_page_dict(object: &Object) -> Result<PageNode> {
+    let dict = object.as_dict().map_err(|_| {
+        PdfOpsError::InvalidStructure("page tree node is not a dictionary".into())
+    })?;
+    match dict.get_type().map_err(PdfOpsError::Pdf)? {
+        b"Page" => Ok(PageNode::Leaf),
+        b"Pages" => {
+            let kids = dict
+                .get(b"Kids")
+                .and_then(Object::as_array)
+                .map_err(PdfOpsError::Pdf)?;
+            Ok(PageNode::Interior(
+                kids.iter()
+                    .filter_map(|kid| kid.as_reference().ok())
+                    .collect(),
+            ))
+        }
+        _ => Ok(PageNode::Other),
     }
 }
 
