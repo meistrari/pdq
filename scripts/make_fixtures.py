@@ -835,10 +835,8 @@ def build_trf4(out_path: Path):
 
 
 if __name__ == "__main__":
-    out_a = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-        "/Users/henrique/Downloads/anon-pje-like-12732p.pdf")
-    out_b = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(
-        "/Users/henrique/Downloads/anon-trf4-like-2642p.pdf")
+    out_a = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("anon-pje-like-12732p.pdf")
+    out_b = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("anon-trf4-like-2642p.pdf")
     print("building B (TRF4-like, 2642p)...")
     build_trf4(out_b)
     print("  ->", out_b, out_b.stat().st_size, "bytes")
