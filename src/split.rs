@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use crate::{
     copy::{copy_pages_with_options, resolve_page_ids, CopyOptions, ObjectSource},
-    lazy::LazyPdf,
+    lazy::PdfSource,
     load::{load_document, map_file},
     range::{PageRangeError, PageRangeGroup},
     split_template::{SinglePageTemplate, WriteGate},
@@ -22,6 +22,17 @@ pub struct SplitOutput {
 }
 
 pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
+    split_with_password(input, outputs, None)
+}
+
+/// Like [`split`], additionally decrypting encrypted inputs with `password`
+/// when the empty user password does not authenticate. Outputs are always
+/// written unencrypted.
+pub fn split_with_password(
+    input: &Path,
+    outputs: &[SplitOutput],
+    password: Option<&str>,
+) -> Result<()> {
     // When every requested range is bounded (no `z`/`rN` endpoint), the page
     // walk can stop at the highest page any output needs — extracting a small
     // range from a huge document must not pay for parsing or enumerating the
@@ -36,13 +47,14 @@ pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
 
     if let Some(limit) = walk_limit {
         // Lazy, mmap-backed source (same as `split-pages`): xref-only
-        // bootstrap plus a walk that stops at `limit` pages. A shorter result
-        // means the document really has fewer pages, so the bounds checks in
-        // `resolve` still see the true count. Every bounded output is treated
-        // as a subset (a prefix walk cannot prove full coverage), so pruning
-        // stays on.
+        // bootstrap plus a walk that stops at `limit` pages (encrypted inputs
+        // transparently fall back to the eager decrypted document inside
+        // `PdfSource`). A shorter result means the document really has fewer
+        // pages, so the bounds checks in `resolve` still see the true count.
+        // Every bounded output is treated as a subset (a prefix walk cannot
+        // prove full coverage), so pruning stays on.
         let mmap = map_file(input)?;
-        let source = LazyPdf::parse(&mmap, input)?;
+        let source = PdfSource::open(&mmap, input, password)?;
         let ordered_pages = source.page_ids_up_to(limit)?;
         if ordered_pages.is_empty() {
             return Err(PdfOpsError::Range(PageRangeError::NoPages));
@@ -53,7 +65,7 @@ pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
         return run_split_outputs(&source, &resolved_outputs);
     }
 
-    let source = load_document(input)?;
+    let source = load_document(input, password)?;
     let pages = source.get_pages();
     let resolved_outputs = resolve_split_outputs(outputs, &pages, false)?;
     reject_duplicate_output_paths(&resolved_outputs)?;
@@ -91,16 +103,41 @@ fn resolve_split_outputs(
 pub struct SplitPagesOptions {
     /// Maximum number of consecutive pages written to each output file.
     pub pages_per_file: usize,
+    /// Password used to decrypt encrypted inputs. The empty user password is
+    /// always tried first, so owner-password-only files split without this.
+    /// Outputs are always written unencrypted.
+    pub password: Option<String>,
 }
 
 impl Default for SplitPagesOptions {
     fn default() -> Self {
-        Self { pages_per_file: 1 }
+        Self {
+            pages_per_file: 1,
+            password: None,
+        }
     }
 }
 
 pub fn split_pages(input: &Path, output_pattern: &str) -> Result<()> {
     split_pages_with_options(input, output_pattern, &SplitPagesOptions::default())
+}
+
+/// Like [`split_pages`], additionally decrypting encrypted inputs with
+/// `password` when the empty user password does not authenticate. Outputs are
+/// always written unencrypted.
+pub fn split_pages_with_password(
+    input: &Path,
+    output_pattern: &str,
+    password: Option<&str>,
+) -> Result<()> {
+    split_pages_with_options(
+        input,
+        output_pattern,
+        &SplitPagesOptions {
+            password: password.map(str::to_owned),
+            ..SplitPagesOptions::default()
+        },
+    )
 }
 
 pub fn split_pages_with_options(
@@ -116,7 +153,7 @@ pub fn split_pages_with_options(
     }
 
     let mmap = map_file(input)?;
-    let source = LazyPdf::parse(&mmap, input)?;
+    let source = PdfSource::open(&mmap, input, options.password.as_deref())?;
     let pages = source.page_ids()?;
     let page_count = pages.len();
     if page_count == 0 {

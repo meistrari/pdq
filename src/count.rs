@@ -1,18 +1,25 @@
 use std::path::Path;
 
-use crate::{lazy::LazyPdf, load::map_file, Result};
+use crate::{lazy::PdfSource, load::map_file, Result};
 
 /// Count the pages in a PDF by walking the page tree (validated count).
 ///
 /// Uses the same lazy, mmap-backed reader as `split-pages` and counts via the
 /// shared page-tree walk (`count_pages`), so it stays cheap on very large
 /// documents — O(1) memory, no per-page id allocation — and can never disagree
-/// with the pages `split`/`split-pages` would resolve. Encrypted PDFs are
-/// rejected, consistent with the rest of the MVP.
+/// with the pages `split`/`split-pages` would resolve. Encrypted PDFs with an
+/// empty user password are decrypted transparently; files that need a real
+/// password require [`page_count_with_password`].
 ///
 /// Returns `0` for a structurally valid PDF that declares no pages.
 pub fn page_count(input: &Path) -> Result<usize> {
-    count_impl(input, true)
+    page_count_with_password(input, None)
+}
+
+/// Like [`page_count`], additionally decrypting encrypted inputs with
+/// `password` when the empty user password does not authenticate.
+pub fn page_count_with_password(input: &Path, password: Option<&str>) -> Result<usize> {
+    count_impl(input, password, true)
 }
 
 /// Count the pages in a PDF by trusting the root `/Pages` `/Count` (fast count).
@@ -23,16 +30,22 @@ pub fn page_count(input: &Path) -> Result<usize> {
 /// so a lying-but-plausible `/Count` is trusted. When `/Count` is missing, not
 /// a direct non-negative integer, or larger than the xref size, this falls
 /// back to the validated walk ([`page_count`]) and still returns the true
-/// count. Encrypted PDFs are rejected exactly as in [`page_count`].
+/// count. Encryption is handled exactly as in [`page_count`].
 pub fn page_count_fast(input: &Path) -> Result<usize> {
-    count_impl(input, false)
+    page_count_fast_with_password(input, None)
 }
 
-fn count_impl(input: &Path, strict: bool) -> Result<usize> {
+/// Like [`page_count_fast`], additionally decrypting encrypted inputs with
+/// `password` when the empty user password does not authenticate.
+pub fn page_count_fast_with_password(input: &Path, password: Option<&str>) -> Result<usize> {
+    count_impl(input, password, false)
+}
+
+fn count_impl(input: &Path, password: Option<&str>, strict: bool) -> Result<usize> {
     let timing = std::env::var_os("PDQ_TIMING").is_some();
     let start = std::time::Instant::now();
     let mmap = map_file(input)?;
-    let source = LazyPdf::parse(&mmap, input)?;
+    let source = PdfSource::open(&mmap, input, password)?;
     if timing {
         eprintln!("phase parse: {:?}", start.elapsed());
     }

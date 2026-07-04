@@ -5,9 +5,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use lopdf::{xref::XrefEntry, Document, LoadOptions, Object, ObjectId, ObjectStream, Reader};
+use lopdf::{xref::XrefEntry, Document, Object, ObjectId, ObjectStream, Reader};
 
-use crate::{copy::ObjectSource, PdfOpsError, Result};
+use crate::{
+    copy::ObjectSource,
+    load::{decorate_load_error, ensure_decrypted, load_options},
+    PdfOpsError, Result,
+};
 
 const OBJECT_STREAM_CACHE_LIMIT: usize = 512;
 /// Shard count for the parsed-object cache. Splitting runs under rayon, so a
@@ -26,6 +30,106 @@ const NORMAL_CACHE_SHARD_LIMIT: usize = 512;
 /// content streams would evict the small shared dictionaries the cache is for.
 const NORMAL_CACHE_MAX_STREAM_BYTES: usize = 8 * 1024;
 
+/// A parsed PDF input: lazily backed by the mmap for plain files, eagerly
+/// loaded for encrypted files.
+///
+/// Unencrypted inputs keep the metadata-only lazy reader — the fast path that
+/// parses objects on demand straight from the buffer. Encrypted inputs cannot
+/// use it: the lazy reader would hand out still-encrypted bytes. lopdf also
+/// ignores the metadata filter for encrypted PDFs and materializes every
+/// object while decrypting during the load, so by the time we know the input
+/// was encrypted we already hold a fully decrypted document — using it
+/// eagerly costs nothing extra.
+//
+// One PdfSource exists per input file and it is only handled by reference,
+// so the enum's size is irrelevant; boxing a variant would just add an
+// indirection to every object lookup on the lazy hot path.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PdfSource<'a> {
+    Lazy(LazyPdf<'a>),
+    Eager(Document),
+}
+
+impl<'a> PdfSource<'a> {
+    /// Parse `buffer`, transparently decrypting encrypted inputs. The empty
+    /// user password is always tried first, then `password` when provided.
+    pub(crate) fn open(buffer: &'a [u8], path: &Path, password: Option<&str>) -> Result<Self> {
+        // Fast path: build only the xref table + trailer straight from the
+        // buffer, skipping lopdf's parse of every object. Encrypted inputs
+        // cannot take it (the lazy reader would hand out still-encrypted
+        // bytes), and any bootstrap anomaly falls back to the full lopdf
+        // parse below so behavior is identical to the slow path.
+        if let Some(document) = crate::xrefboot::bootstrap_document(buffer) {
+            if !document.is_encrypted() && !document.was_encrypted() {
+                return Ok(Self::Lazy(LazyPdf::new(buffer, document)?));
+            }
+        } else if std::env::var_os("PDQ_TIMING").is_some() {
+            eprintln!("phase parse: xref bootstrap fell back to full lopdf parse");
+        }
+
+        let document =
+            Document::load_mem_with_options(buffer, load_options(password, Some(drop_object)))
+                .map_err(|err| decorate_load_error(err, path))?;
+        ensure_decrypted(&document, path)?;
+        if document.was_encrypted() {
+            return Ok(Self::Eager(document));
+        }
+        Ok(Self::Lazy(LazyPdf::new(buffer, document)?))
+    }
+
+    pub(crate) fn page_ids(&self) -> Result<Vec<ObjectId>> {
+        match self {
+            Self::Lazy(lazy) => lazy.page_ids(),
+            Self::Eager(document) => Ok(document.page_iter().collect()),
+        }
+    }
+
+    /// Ids of the first `limit` pages in document order; fewer when the
+    /// document has fewer pages. See [`LazyPdf::page_ids_up_to`].
+    pub(crate) fn page_ids_up_to(&self, limit: usize) -> Result<Vec<ObjectId>> {
+        match self {
+            Self::Lazy(lazy) => lazy.page_ids_up_to(limit),
+            Self::Eager(document) => Ok(document.page_iter().take(limit).collect()),
+        }
+    }
+
+    pub(crate) fn count_pages(&self) -> Result<usize> {
+        match self {
+            Self::Lazy(lazy) => lazy.count_pages(),
+            Self::Eager(document) => Ok(document.page_iter().count()),
+        }
+    }
+
+    /// Trusted-count fast path (`qpdf --show-npages` semantics); see
+    /// [`LazyPdf::count_pages_fast`]. Eager (decrypted) documents are already
+    /// fully parsed, so counting their page iterator costs nothing extra.
+    pub(crate) fn count_pages_fast(&self) -> Result<usize> {
+        match self {
+            Self::Lazy(lazy) => lazy.count_pages_fast(),
+            Self::Eager(document) => Ok(document.page_iter().count()),
+        }
+    }
+
+    /// True when the input was encrypted and decrypted during the load. Such
+    /// inputs must be rewritten — never byte-copied — so that outputs are
+    /// always unencrypted.
+    pub(crate) fn was_encrypted(&self) -> bool {
+        match self {
+            Self::Lazy(_) => false,
+            Self::Eager(document) => document.was_encrypted(),
+        }
+    }
+}
+
+impl ObjectSource for PdfSource<'_> {
+    fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error> {
+        match self {
+            Self::Lazy(lazy) => lazy.get_object_value(id),
+            Self::Eager(document) => document.get_object_value(id),
+        }
+    }
+}
+
 pub(crate) struct LazyPdf<'a> {
     reader: Reader<'a>,
     object_streams: Mutex<ObjectStreamCache>,
@@ -33,26 +137,9 @@ pub(crate) struct LazyPdf<'a> {
 }
 
 impl<'a> LazyPdf<'a> {
-    pub(crate) fn parse(buffer: &'a [u8], path: &Path) -> Result<Self> {
-        // Fast path: build only the xref table + trailer straight from the
-        // buffer. On any anomaly (including encrypted files) fall back to the
-        // full lopdf parse so behavior is identical to the slow path.
-        let document = match crate::xrefboot::bootstrap_document(buffer) {
-            Some(document) => document,
-            None => {
-                if std::env::var_os("PDQ_TIMING").is_some() {
-                    eprintln!("phase parse: xref bootstrap fell back to full lopdf parse");
-                }
-                Document::load_mem_with_options(buffer, LoadOptions::with_filter(drop_object))?
-            }
-        };
-        if document.is_encrypted() || document.was_encrypted() {
-            return Err(PdfOpsError::Unsupported(format!(
-                "encrypted PDFs are not supported: {}",
-                path.display()
-            )));
-        }
-
+    /// Build the lazy reader from a metadata-only `Document` (trailer and
+    /// xref, no objects) previously loaded from `buffer`.
+    fn new(buffer: &'a [u8], document: Document) -> Result<Self> {
         let reader = Reader {
             buffer,
             document,

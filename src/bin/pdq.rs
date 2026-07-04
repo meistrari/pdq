@@ -2,8 +2,9 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
-    merge_with_options, page_count, page_count_fast, split, split_pages_with_options, MergeInput,
-    MergeOptions, PageRangeGroup, SplitOutput, SplitPagesOptions,
+    merge_with_options, page_count_fast_with_password, page_count_with_password,
+    split_pages_with_options, split_with_password, MergeInput, MergeOptions, PageRangeGroup,
+    SplitOutput, SplitPagesOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -31,6 +32,10 @@ struct SplitArgs {
 
     #[arg(long = "out", required = true, value_names = ["RANGE", "PATH"], num_args = 2)]
     outputs: Vec<String>,
+
+    /// Password for encrypted inputs; outputs are always written decrypted
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -40,6 +45,10 @@ struct MergeArgs {
 
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
+
+    /// Password for encrypted inputs; outputs are always written decrypted
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -57,6 +66,10 @@ struct SplitPagesArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pages_per_file: u64,
+
+    /// Password for encrypted inputs; outputs are always written decrypted
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -68,6 +81,10 @@ struct PageCountArgs {
     /// implausible /Count already falls back to this walk automatically)
     #[arg(long)]
     strict: bool,
+
+    /// Password for encrypted inputs
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
 }
 
 #[cfg(feature = "render")]
@@ -97,7 +114,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Split(args) => {
             let outputs = parse_split_outputs(args.outputs)?;
-            split(&args.input, &outputs)?;
+            split_with_password(&args.input, &outputs, args.password.as_deref())?;
         }
         Command::SplitPages(args) => {
             split_pages_with_options(
@@ -105,6 +122,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &args.output,
                 &SplitPagesOptions {
                     pages_per_file: args.pages_per_file as usize,
+                    password: args.password,
                 },
             )?;
         }
@@ -115,14 +133,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &args.output,
                 MergeOptions {
                     preserve_whole_single_input: true,
+                    password: args.password,
                 },
             )?;
         }
         Command::PageCount(args) => {
             let count = if args.strict {
-                page_count(&args.input)?
+                page_count_with_password(&args.input, args.password.as_deref())?
             } else {
-                page_count_fast(&args.input)?
+                page_count_fast_with_password(&args.input, args.password.as_deref())?
             };
             println!("{count}");
         }

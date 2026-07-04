@@ -27,6 +27,16 @@ fn assert_page_count(path: &Path, expected: usize) {
     );
 }
 
+fn assert_not_encrypted(path: &Path) {
+    let document = Document::load(path)
+        .unwrap_or_else(|err| panic!("failed to load {}: {err}", path.display()));
+    assert!(
+        !document.is_encrypted() && !document.was_encrypted(),
+        "{} should be written unencrypted",
+        path.display()
+    );
+}
+
 #[test]
 fn split_cli_writes_each_requested_range() {
     let temp = tempdir().unwrap();
@@ -103,7 +113,7 @@ fn split_cli_fails_on_missing_input() {
 }
 
 #[test]
-fn split_cli_rejects_encrypted_input() {
+fn split_cli_requires_password_for_user_password_input() {
     let temp = tempdir().unwrap();
     let output = temp.path().join("out.pdf");
 
@@ -115,9 +125,107 @@ fn split_cli_rejects_encrypted_input() {
         .arg(&output)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported"));
+        .stderr(predicate::str::contains("--password"));
 
     assert!(!output.exists());
+}
+
+#[test]
+fn split_cli_rejects_wrong_password() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("out.pdf");
+
+    pdq()
+        .arg("split")
+        .arg(fixture("user-password.pdf"))
+        .arg("--password")
+        .arg("wrong")
+        .arg("--out")
+        .arg("1")
+        .arg(&output)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid password"));
+
+    assert!(!output.exists());
+}
+
+#[test]
+fn split_cli_decrypts_user_password_input_with_password() {
+    let temp = tempdir().unwrap();
+    let output = temp.path().join("decrypted.pdf");
+
+    pdq()
+        .arg("split")
+        .arg(fixture("user-password.pdf"))
+        .arg("--password")
+        .arg("user")
+        .arg("--out")
+        .arg("1-3")
+        .arg(&output)
+        .assert()
+        .success();
+
+    assert_page_count(&output, 3);
+    assert_not_encrypted(&output);
+}
+
+#[test]
+fn split_pages_cli_decrypts_owner_only_input_without_password() {
+    let temp = tempdir().unwrap();
+
+    pdq()
+        .arg("split-pages")
+        .arg(fixture("owner-only.pdf"))
+        .arg("--output")
+        .arg(temp.path().join("page-%d.pdf"))
+        .assert()
+        .success();
+
+    for page in 1..=11 {
+        let path = temp.path().join(format!("page-{page:02}.pdf"));
+        assert_page_count(&path, 1);
+        assert_not_encrypted(&path);
+    }
+}
+
+#[test]
+fn merge_cli_decrypts_single_encrypted_input() {
+    let temp = tempdir().unwrap();
+    let merged = temp.path().join("merged.pdf");
+
+    pdq()
+        .arg("merge")
+        .arg("--output")
+        .arg(&merged)
+        .arg(fixture("owner-only.pdf"))
+        .assert()
+        .success();
+
+    assert_page_count(&merged, 11);
+    assert_not_encrypted(&merged);
+}
+
+#[test]
+fn page_count_cli_reads_owner_only_encrypted_input_without_password() {
+    pdq()
+        .arg("page-count")
+        .arg(fixture("owner-only.pdf"))
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("11\n"));
+}
+
+#[test]
+fn page_count_cli_reads_user_password_input_with_password() {
+    pdq()
+        .arg("page-count")
+        .arg(fixture("user-password.pdf"))
+        .arg("--password")
+        .arg("user")
+        .assert()
+        .success()
+        .stdout(predicate::str::diff("11\n"));
 }
 
 #[test]
@@ -228,19 +336,31 @@ fn page_count_cli_strict_flag_reports_total_pages() {
 }
 
 #[test]
-fn page_count_cli_rejects_encrypted_input_in_both_modes() {
-    for encrypted in ["user-password.pdf", "owner-only.pdf"] {
-        for strict in [false, true] {
-            let mut cmd = pdq();
-            cmd.arg("page-count");
-            if strict {
-                cmd.arg("--strict");
-            }
-            cmd.arg(fixture(encrypted))
-                .assert()
-                .failure()
-                .stderr(predicate::str::contains("unsupported"));
+fn page_count_cli_encrypted_inputs_behave_the_same_in_both_modes() {
+    for strict in [false, true] {
+        // A real user password is required: without it both modes must fail
+        // with the password guidance, never a wrong count.
+        let mut cmd = pdq();
+        cmd.arg("page-count");
+        if strict {
+            cmd.arg("--strict");
         }
+        cmd.arg(fixture("user-password.pdf"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("password"));
+
+        // Owner-password-only files decrypt with the empty user password and
+        // must count identically in fast and strict modes.
+        let mut cmd = pdq();
+        cmd.arg("page-count");
+        if strict {
+            cmd.arg("--strict");
+        }
+        cmd.arg(fixture("owner-only.pdf"))
+            .assert()
+            .success()
+            .stdout(predicate::str::diff("11\n"));
     }
 }
 
@@ -262,6 +382,30 @@ fn split_pages_cli_chunks_pages_per_file() {
     assert_page_count(&temp.path().join("chunk-2.pdf"), 4);
     assert_page_count(&temp.path().join("chunk-3.pdf"), 3);
     assert!(!temp.path().join("chunk-4.pdf").exists());
+}
+
+#[test]
+fn split_pages_cli_chunks_and_decrypts_with_password() {
+    let temp = tempdir().unwrap();
+
+    pdq()
+        .arg("split-pages")
+        .arg(fixture("user-password.pdf"))
+        .arg("--output")
+        .arg(temp.path().join("chunk-%d.pdf"))
+        .arg("--pages-per-file")
+        .arg("3")
+        .arg("--password")
+        .arg("user")
+        .assert()
+        .success();
+
+    for (chunk, expected_pages) in [(1, 3), (2, 3), (3, 3), (4, 2)] {
+        let path = temp.path().join(format!("chunk-{chunk}.pdf"));
+        assert_page_count(&path, expected_pages);
+        assert_not_encrypted(&path);
+    }
+    assert!(!temp.path().join("chunk-5.pdf").exists());
 }
 
 #[test]
