@@ -6,8 +6,8 @@ use std::{
 
 use lopdf::{dictionary, Dictionary, Document, Object, Stream};
 use pdq::{
-    merge, merge_with_options, page_count, split, split_pages, MergeInput, MergeOptions,
-    PageRangeGroup, PdfOpsError, SplitOutput,
+    merge, merge_with_options, page_count, split, split_pages, split_pages_with_options,
+    MergeInput, MergeOptions, PageRangeGroup, PdfOpsError, SplitOutput, SplitPagesOptions,
 };
 use tempfile::tempdir;
 
@@ -345,6 +345,100 @@ fn split_pages_cli_writes_one_output_per_page() {
 }
 
 #[test]
+fn split_pages_with_options_chunks_pages_and_qpdf_validates_page_counts() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("five-pages.pdf");
+    let pattern = temp.path().join("chunk-%d.pdf");
+
+    write_simple_pdf(&input, 5);
+    split_pages_with_options(
+        &input,
+        pattern.to_str().unwrap(),
+        &SplitPagesOptions { pages_per_file: 2 },
+    )
+    .unwrap();
+
+    let qpdf = QpdfValidator::detect();
+    for (chunk, expected_pages) in [(1, 2), (2, 2), (3, 1)] {
+        let path = temp.path().join(format!("chunk-{chunk}.pdf"));
+        assert_written(&path);
+        qpdf.validate(&path, expected_pages);
+    }
+    assert!(!temp.path().join("chunk-4.pdf").exists());
+}
+
+#[test]
+fn split_pages_with_options_larger_than_page_count_writes_single_output() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("five-pages.pdf");
+    let pattern = temp.path().join("all-%d.pdf");
+
+    write_simple_pdf(&input, 5);
+    split_pages_with_options(
+        &input,
+        pattern.to_str().unwrap(),
+        &SplitPagesOptions { pages_per_file: 9 },
+    )
+    .unwrap();
+
+    let output = temp.path().join("all-1.pdf");
+    assert_written(&output);
+    QpdfValidator::detect().validate(&output, 5);
+    assert!(!temp.path().join("all-2.pdf").exists());
+}
+
+#[test]
+fn split_pages_with_options_rejects_zero_pages_per_file() {
+    let temp = tempdir().unwrap();
+    let pattern = temp.path().join("should-not-exist-%d.pdf");
+
+    let error = split_pages_with_options(
+        &fixture("11-pages.pdf"),
+        pattern.to_str().unwrap(),
+        &SplitPagesOptions { pages_per_file: 0 },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, PdfOpsError::InvalidStructure(_)));
+    assert!(!temp.path().join("should-not-exist-1.pdf").exists());
+}
+
+#[test]
+fn split_pages_with_options_pads_numbers_to_chunk_count_width() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("twelve-pages.pdf");
+
+    write_simple_pdf(&input, 12);
+
+    let per_page_pattern = temp.path().join("page-%d.pdf");
+    split_pages_with_options(
+        &input,
+        per_page_pattern.to_str().unwrap(),
+        &SplitPagesOptions { pages_per_file: 1 },
+    )
+    .unwrap();
+    for page in 1..=12 {
+        assert_written(&temp.path().join(format!("page-{page:02}.pdf")));
+    }
+
+    let chunk_pattern = temp.path().join("chunk-%d.pdf");
+    split_pages_with_options(
+        &input,
+        chunk_pattern.to_str().unwrap(),
+        &SplitPagesOptions { pages_per_file: 5 },
+    )
+    .unwrap();
+
+    let qpdf = QpdfValidator::detect();
+    for (chunk, expected_pages) in [(1, 5), (2, 5), (3, 2)] {
+        let path = temp.path().join(format!("chunk-{chunk}.pdf"));
+        assert_written(&path);
+        qpdf.validate(&path, expected_pages);
+    }
+    assert!(!temp.path().join("chunk-4.pdf").exists());
+}
+
+#[test]
 fn split_pages_writes_object_stream_input() {
     let temp = tempdir().unwrap();
     let pattern = temp.path().join("obj-page-%d.pdf");
@@ -570,6 +664,51 @@ fn split_rejects_duplicate_output_paths_before_writing() {
 
     assert!(matches!(error, PdfOpsError::InvalidStructure(_)));
     assert!(!duplicate.exists());
+}
+
+fn write_simple_pdf(path: &Path, page_count: usize) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+
+    let kids = (0..page_count)
+        .map(|_| {
+            let content_id = document.add_object(Object::Stream(Stream::new(
+                Dictionary::new(),
+                b"q Q".to_vec(),
+            )));
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+                "Resources" => dictionary! {},
+                "Contents" => content_id,
+            });
+            Object::Reference(page_id)
+        })
+        .collect::<Vec<_>>();
+
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(kids),
+            "Count" => page_count as i64,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save simple fixture: {err}"));
 }
 
 fn write_one_page_pdf_with_dangling_reference(path: &Path) {

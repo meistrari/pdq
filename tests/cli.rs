@@ -208,6 +208,44 @@ fn split_pages_cli_rejects_pattern_with_multiple_placeholders() {
 }
 
 #[test]
+fn split_pages_cli_chunks_pages_per_file() {
+    let temp = tempdir().unwrap();
+
+    pdq()
+        .arg("split-pages")
+        .arg(fixture("11-pages.pdf"))
+        .arg("--output")
+        .arg(temp.path().join("chunk-%d.pdf"))
+        .arg("--pages-per-file")
+        .arg("4")
+        .assert()
+        .success();
+
+    assert_page_count(&temp.path().join("chunk-1.pdf"), 4);
+    assert_page_count(&temp.path().join("chunk-2.pdf"), 4);
+    assert_page_count(&temp.path().join("chunk-3.pdf"), 3);
+    assert!(!temp.path().join("chunk-4.pdf").exists());
+}
+
+#[test]
+fn split_pages_cli_rejects_zero_pages_per_file() {
+    let temp = tempdir().unwrap();
+
+    pdq()
+        .arg("split-pages")
+        .arg(fixture("11-pages.pdf"))
+        .arg("--output")
+        .arg(temp.path().join("chunk-%d.pdf"))
+        .arg("--pages-per-file")
+        .arg("0")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pages-per-file"));
+
+    assert!(!temp.path().join("chunk-1.pdf").exists());
+}
+
+#[test]
 fn cli_without_subcommand_prints_usage() {
     pdq()
         .assert()

@@ -2,8 +2,8 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
 use pdq::{
-    merge_with_options, page_count, split, split_pages, MergeInput, MergeOptions, PageRangeGroup,
-    SplitOutput,
+    merge_with_options, page_count, split, split_pages_with_options, MergeInput, MergeOptions,
+    PageRangeGroup, SplitOutput, SplitPagesOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -47,6 +47,15 @@ struct SplitPagesArgs {
 
     #[arg(short, long, value_name = "PATTERN")]
     output: String,
+
+    /// Maximum number of pages per output file (%d becomes the chunk index)
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pages_per_file: u64,
 }
 
 #[derive(Debug, Args)]
@@ -84,7 +93,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             split(&args.input, &outputs)?;
         }
         Command::SplitPages(args) => {
-            split_pages(&args.input, &args.output)?;
+            split_pages_with_options(
+                &args.input,
+                &args.output,
+                &SplitPagesOptions {
+                    pages_per_file: args.pages_per_file as usize,
+                },
+            )?;
         }
         Command::Merge(args) => {
             let inputs = parse_merge_inputs(args.inputs);

@@ -20,9 +20,14 @@ out of scope for the current MVP.
 cargo test
 cargo run --bin pdq -- split input.pdf --out 1-3 out-1.pdf --out 4-z out-2.pdf
 cargo run --bin pdq -- split-pages --output 'page-%d.pdf' input.pdf
+cargo run --bin pdq -- split-pages --output 'chunk-%d.pdf' --pages-per-file 3 input.pdf
 cargo run --bin pdq -- merge --output merged.pdf a.pdf b.pdf
 cargo run --bin pdq -- page-count input.pdf
 ```
+
+`split-pages --pages-per-file N` groups consecutive pages into files of at most
+N pages each (`%d` is the 1-based chunk index; the last chunk may contain fewer
+pages). The default of 1 writes one page per file.
 
 `page-count` prints the number of pages to stdout (the `lopdf`-native equivalent
 of `qpdf --show-npages`).
