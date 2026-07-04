@@ -8,7 +8,7 @@ use std::{
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-use crate::{scan, scan::UsedNames, PdfOpsError, Result};
+use crate::{filter::decode_stream_content, scan, scan::UsedNames, PdfOpsError, Result};
 
 const INHERITABLE_PAGE_ATTRS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 const MAX_COPY_DEPTH: usize = 256;
@@ -468,7 +468,7 @@ impl CopyContext {
         let Some(used) = scan::collect_used_names_from_stream(
             source,
             stream_id,
-            || stream.decompressed_content().ok(),
+            || decode_stream_content(stream).ok(),
             &resources,
             &mut self.dictionary_cache,
             &mut self.used_names_cache,

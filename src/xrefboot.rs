@@ -24,6 +24,8 @@ use lopdf::{
     Dictionary, Document, Object, Stream, StringFormat,
 };
 
+use crate::filter::decode_stream_content;
+
 /// Upper bound on incremental-update sections we are willing to follow.
 const MAX_CHAIN_SECTIONS: usize = 1024;
 /// Maximum nesting depth for trailer-dictionary values.
@@ -312,7 +314,7 @@ fn parse_stream_section(mut lexer: Lexer) -> Option<Section> {
     }
 
     let stream = Stream::new(dict, raw_content.to_vec());
-    let content = stream.decompressed_content().ok()?;
+    let content = decode_stream_content(&stream).ok()?;
     let mut trailer = stream.dict;
 
     let sink = decode_stream_entries(&content, &trailer)?;

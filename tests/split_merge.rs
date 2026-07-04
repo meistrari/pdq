@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -243,6 +244,44 @@ fn page_count_library_matches_object_stream_input() {
     // Object-stream (compressed xref) input exercises the lazy reader's
     // compressed-object path, mirroring the split-pages fixtures.
     assert_eq!(page_count(&fixture("11-pages-objstm.pdf")).unwrap(), 11);
+}
+
+#[test]
+fn operations_handle_filter_abbreviations_in_xref_object_and_content_streams() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("filter-abbreviation.pdf");
+    let split_output = temp.path().join("split.pdf");
+    let merged = temp.path().join("merged.pdf");
+
+    write_filter_abbreviation_pdf(&input);
+
+    assert_eq!(page_count(&input).unwrap(), 1);
+    assert_eq!(page_count_fast(&input).unwrap(), 1);
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1").unwrap(),
+            path: split_output.clone(),
+        }],
+    )
+    .unwrap();
+    assert_written(&split_output);
+
+    merge(
+        &[MergeInput {
+            path: input,
+            ranges: vec![PageRangeGroup::parse("1").unwrap()],
+        }],
+        &merged,
+    )
+    .unwrap();
+    assert_written(&merged);
+
+    let qpdf = QpdfValidator::detect();
+    qpdf.validate(&split_output, 1);
+    qpdf.validate(&merged, 1);
+    assert_page_resources(&split_output, &qpdf, &["X0"], &[]);
 }
 
 #[test]
@@ -1099,6 +1138,120 @@ fn split_rejects_duplicate_output_paths_before_writing() {
 
 /// Three real leaf pages; the root /Pages carries `count` verbatim as /Count
 /// (or omits the key entirely) so tests can probe the trusted-count fast path.
+fn write_filter_abbreviation_pdf(path: &Path) {
+    let mut pdf = Vec::new();
+    let mut offsets = [0usize; 11];
+
+    pdf.extend_from_slice(b"%PDF-1.5\n%\xff\xff\xff\xff\n");
+
+    let (object_stream, first) = object_stream_content(&[
+        (2, b"<< /Type /Catalog /Pages 3 0 R >>".as_slice()),
+        (3, b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>".as_slice()),
+        (
+            4,
+            b"<< /Type /Page /Parent 3 0 R /MediaBox [0 0 100 100] \
+              /Resources 5 0 R /Contents 7 0 R >>"
+                .as_slice(),
+        ),
+        (
+            5,
+            b"<< /XObject << /X0 8 0 R /X1 9 0 R /X2 9 0 R /X3 9 0 R \
+              /X4 9 0 R /X5 9 0 R /X6 9 0 R >> >>"
+                .as_slice(),
+        ),
+    ]);
+    let compressed_object_stream = zlib_compress(&object_stream);
+    offsets[1] = push_stream_object(
+        &mut pdf,
+        1,
+        &format!("/Type /ObjStm /Filter /Fl /N 4 /First {first}"),
+        &compressed_object_stream,
+    );
+
+    let compressed_content = zlib_compress(b"q /X0 Do Q");
+    offsets[7] = push_stream_object(&mut pdf, 7, "/Filter /Fl", &compressed_content);
+    offsets[8] = push_stream_object(
+        &mut pdf,
+        8,
+        "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << >>",
+        b"q Q",
+    );
+    offsets[9] = push_stream_object(
+        &mut pdf,
+        9,
+        "/Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << >>",
+        b"q Q",
+    );
+
+    offsets[10] = pdf.len();
+    let mut xref_rows = Vec::new();
+    push_xref_row(&mut xref_rows, 0, 0, u16::MAX);
+    push_xref_row(&mut xref_rows, 1, offsets[1] as u32, 0);
+    for (index, object_number) in (2u16..=5).enumerate() {
+        assert_eq!(object_number as usize, index + 2);
+        push_xref_row(&mut xref_rows, 2, 1, index as u16);
+    }
+    push_xref_row(&mut xref_rows, 0, 0, u16::MAX);
+    push_xref_row(&mut xref_rows, 1, offsets[7] as u32, 0);
+    push_xref_row(&mut xref_rows, 1, offsets[8] as u32, 0);
+    push_xref_row(&mut xref_rows, 1, offsets[9] as u32, 0);
+    push_xref_row(&mut xref_rows, 1, offsets[10] as u32, 0);
+
+    let compressed_xref = zlib_compress(&xref_rows);
+    push_stream_object(
+        &mut pdf,
+        10,
+        "/Type /XRef /Filter /Fl /Size 11 /Index [0 11] /W [1 4 2] /Root 2 0 R",
+        &compressed_xref,
+    );
+    write!(pdf, "startxref\n{}\n%%EOF\n", offsets[10]).unwrap();
+
+    fs::write(path, pdf).unwrap_or_else(|err| {
+        panic!(
+            "failed to write filter abbreviation fixture {}: {err}",
+            path.display()
+        )
+    });
+}
+
+fn object_stream_content(objects: &[(u32, &[u8])]) -> (Vec<u8>, usize) {
+    let mut header = Vec::new();
+    let mut body = Vec::new();
+    for (object_number, object) in objects {
+        write!(header, "{object_number} {} ", body.len()).unwrap();
+        body.extend_from_slice(object);
+        body.push(b'\n');
+    }
+    let first = header.len();
+    header.extend_from_slice(&body);
+    (header, first)
+}
+
+fn push_stream_object(pdf: &mut Vec<u8>, id: u32, dict_entries: &str, content: &[u8]) -> usize {
+    let offset = pdf.len();
+    write!(
+        pdf,
+        "{id} 0 obj\n<< {dict_entries} /Length {} >>\nstream\n",
+        content.len()
+    )
+    .unwrap();
+    pdf.extend_from_slice(content);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    offset
+}
+
+fn push_xref_row(rows: &mut Vec<u8>, entry_type: u8, second: u32, third: u16) {
+    rows.push(entry_type);
+    rows.extend_from_slice(&second.to_be_bytes());
+    rows.extend_from_slice(&third.to_be_bytes());
+}
+
+fn zlib_compress(data: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
 fn write_three_page_pdf_with_count(path: &Path, count: Option<Object>) {
     let mut document = Document::with_version("1.7");
     let catalog_id = document.new_object_id();

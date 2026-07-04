@@ -6,7 +6,7 @@ use std::{
 
 use lopdf::{content::Content, Dictionary, Object, ObjectId};
 
-use crate::{copy::ObjectSource, Result};
+use crate::{copy::ObjectSource, filter::decode_stream_content, Result};
 
 const MAX_FORM_RESOURCE_DEPTH: usize = 32;
 
@@ -167,7 +167,7 @@ fn collect_form_names(
         }
 
         let Some(form_used) = scan_names_cached(id, state.used_names_cache, || {
-            stream.decompressed_content().ok()
+            decode_stream_content(&stream).ok()
         }) else {
             if strict_own_form_failures {
                 return Ok(false);
@@ -309,7 +309,7 @@ fn content_bytes(source: &impl ObjectSource, page: &Dictionary) -> Result<Option
             }))
         }
         Object::Stream(stream) => {
-            let Ok(decoded) = stream.decompressed_content() else {
+            let Ok(decoded) = decode_stream_content(stream) else {
                 return Ok(None);
             };
             Ok(Some(ContentBytes {
@@ -342,7 +342,7 @@ fn content_stream_bytes(source: &impl ObjectSource, id: ObjectId) -> Result<Opti
     let Ok(stream) = object.as_stream() else {
         return Ok(None);
     };
-    let Ok(decoded) = stream.decompressed_content() else {
+    let Ok(decoded) = decode_stream_content(stream) else {
         return Ok(None);
     };
     Ok(Some(decoded))

@@ -33,6 +33,7 @@ use lopdf::{
 use memchr::memmem;
 
 use crate::{
+    filter::decode_stream_content,
     lazy::PdfSource,
     xrefboot::{is_delimiter, is_whitespace, parse_version, Lexer},
     PdfOpsError, Result,
@@ -448,9 +449,7 @@ fn expand_object_stream(
     let stream = lopdf::Stream::new(candidate.dict.clone(), content.to_vec());
     // An undecodable stream contributes nothing; an unfiltered one is its own
     // decoded content.
-    let decoded = stream
-        .decompressed_content()
-        .unwrap_or_else(|_| content.to_vec());
+    let decoded = decode_stream_content(&stream).unwrap_or_else(|_| content.to_vec());
     let first = candidate
         .dict
         .get(b"First")

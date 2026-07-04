@@ -1,5 +1,6 @@
 pub mod copy;
 pub mod count;
+mod filter;
 pub mod lazy;
 pub mod load;
 pub mod merge;
