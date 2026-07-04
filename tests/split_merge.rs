@@ -460,6 +460,70 @@ fn page_count_rejects_non_reference_page_tree_kids() {
 }
 
 #[test]
+fn page_count_counts_duplicate_page_occurrences() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("duplicate-page-occurrence.pdf");
+    write_duplicate_page_occurrence_pdf(&input, 2);
+
+    assert_eq!(page_count(&input).unwrap(), 2);
+    QpdfValidator::detect().assert_npages(&input, 2);
+}
+
+#[test]
+fn split_pages_writes_duplicate_page_occurrences() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("duplicate-page-occurrence.pdf");
+    write_duplicate_page_occurrence_pdf(&input, 2);
+    let pattern = temp.path().join("page-%d.pdf");
+
+    split_pages(&input, pattern.to_str().unwrap()).unwrap();
+
+    let qpdf = QpdfValidator::detect();
+    for page in 1..=2 {
+        let output = temp.path().join(format!("page-{page}.pdf"));
+        assert_written(&output);
+        qpdf.validate(&output, 1);
+    }
+}
+
+#[test]
+fn page_count_allows_many_duplicate_page_occurrences() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("many-duplicate-page-occurrences.pdf");
+    write_duplicate_page_occurrence_pdf(&input, 20);
+
+    assert_eq!(page_count(&input).unwrap(), 20);
+}
+
+#[test]
+fn page_count_counts_shared_kid_diamond_occurrences() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("shared-kid-diamond.pdf");
+    write_shared_kid_diamond_pdf(&input);
+
+    assert_eq!(page_count(&input).unwrap(), 2);
+    QpdfValidator::detect().assert_npages(&input, 2);
+}
+
+#[test]
+fn page_count_rejects_self_loop_page_tree() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("self-loop-page-tree.pdf");
+    write_self_loop_page_tree_pdf(&input);
+
+    assert_page_tree_cycle(&input);
+}
+
+#[test]
+fn page_count_rejects_ancestor_loop_page_tree() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("ancestor-loop-page-tree.pdf");
+    write_ancestor_loop_page_tree_pdf(&input);
+
+    assert_page_tree_cycle(&input);
+}
+
+#[test]
 fn page_count_encrypted_inputs_behave_the_same_in_both_modes() {
     // A real user password is required: without it both modes fail with the
     // password error, never a wrong count.
@@ -1485,6 +1549,199 @@ fn write_page_tree_with_bad_kids(path: &Path, kids: Object) {
     document
         .save(path)
         .unwrap_or_else(|err| panic!("failed to save bad page-tree fixture: {err}"));
+}
+
+fn write_duplicate_page_occurrence_pdf(path: &Path, occurrences: usize) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let page_id = document.new_object_id();
+    let content_id = document.new_object_id();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(
+                (0..occurrences)
+                    .map(|_| Object::Reference(page_id))
+                    .collect()
+            ),
+            "Count" => occurrences as i64,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        page_id,
+        dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+            "Resources" => dictionary! {},
+            "Contents" => content_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        content_id,
+        Object::Stream(Stream::new(Dictionary::new(), b"q Q".to_vec())),
+    );
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save duplicate-page fixture: {err}"));
+}
+
+fn write_shared_kid_diamond_pdf(path: &Path) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let root_pages_id = document.new_object_id();
+    let left_pages_id = document.new_object_id();
+    let right_pages_id = document.new_object_id();
+    let page_id = document.new_object_id();
+    let content_id = document.new_object_id();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => root_pages_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        root_pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![
+                Object::Reference(left_pages_id),
+                Object::Reference(right_pages_id),
+            ]),
+            "Count" => 2,
+        }
+        .into(),
+    );
+    for pages_id in [left_pages_id, right_pages_id] {
+        document.objects.insert(
+            pages_id,
+            dictionary! {
+                "Type" => "Pages",
+                "Parent" => root_pages_id,
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+            }
+            .into(),
+        );
+    }
+    document.objects.insert(
+        page_id,
+        dictionary! {
+            "Type" => "Page",
+            "Parent" => left_pages_id,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+            "Resources" => dictionary! {},
+            "Contents" => content_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        content_id,
+        Object::Stream(Stream::new(Dictionary::new(), b"q Q".to_vec())),
+    );
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save shared-kid fixture: {err}"));
+}
+
+fn write_self_loop_page_tree_pdf(path: &Path) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(pages_id)]),
+            "Count" => 1,
+        }
+        .into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save self-loop fixture: {err}"));
+}
+
+fn write_ancestor_loop_page_tree_pdf(path: &Path) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_a_id = document.new_object_id();
+    let pages_b_id = document.new_object_id();
+
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_a_id,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        pages_a_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(pages_b_id)]),
+            "Count" => 1,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        pages_b_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Parent" => pages_a_id,
+            "Kids" => Object::Array(vec![Object::Reference(pages_a_id)]),
+            "Count" => 1,
+        }
+        .into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save ancestor-loop fixture: {err}"));
+}
+
+fn assert_page_tree_cycle(path: &Path) {
+    let error = page_count(path).unwrap_err();
+    match error {
+        PdfOpsError::InvalidStructure(message) => assert!(
+            message.contains("cycle detected in page tree"),
+            "unexpected invalid-structure error for {}: {message}",
+            path.display()
+        ),
+        other => panic!(
+            "expected page-tree cycle for {}, got {other:?}",
+            path.display()
+        ),
+    }
 }
 
 fn write_simple_pdf(path: &Path, page_count: usize) {
