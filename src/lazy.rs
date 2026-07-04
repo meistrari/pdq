@@ -9,6 +9,7 @@ use lopdf::{xref::XrefEntry, Document, Object, ObjectId, ObjectStream, Reader};
 
 use crate::{
     copy::ObjectSource,
+    filter::normalize_stream_filter_names,
     load::{decorate_load_error, ensure_decrypted, load_options, upgrade_damaged_xref_error},
     PdfOpsError, Result,
 };
@@ -415,6 +416,7 @@ impl<'a> LazyPdf<'a> {
         let mut already_seen = HashSet::new();
         let container_object = self.reader.get_object(container_id, &mut already_seen)?;
         let mut container_stream = container_object.as_stream()?.clone();
+        normalize_stream_filter_names(&mut container_stream);
         let object_stream = Arc::new(ObjectStream::new(&mut container_stream)?.objects);
         self.object_streams
             .lock()

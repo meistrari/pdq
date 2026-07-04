@@ -3,7 +3,9 @@ use std::{fs::File, path::Path};
 use lopdf::{Document, FilterFunc, LoadOptions};
 use memmap2::{Mmap, MmapOptions};
 
-use crate::{range::PageRangeError, PdfOpsError, Result};
+use crate::{
+    filter::normalize_filter_names_for_lopdf_load, range::PageRangeError, PdfOpsError, Result,
+};
 
 /// Load a whole document eagerly, transparently decrypting encrypted inputs.
 ///
@@ -18,8 +20,11 @@ use crate::{range::PageRangeError, PdfOpsError, Result};
 /// unencrypted.
 pub(crate) fn load_document(path: &Path, password: Option<&str>) -> Result<Document> {
     let mmap = map_file(path)?;
-    let document = Document::load_mem_with_options(&mmap, load_options(password, None))
-        .map_err(|err| decorate_load_error(err, path))?;
+    let document = Document::load_mem_with_options(
+        &mmap,
+        load_options(password, Some(normalize_filter_names_for_lopdf_load)),
+    )
+    .map_err(|err| decorate_load_error(err, path))?;
     ensure_decrypted(&document, path)?;
     if document.page_iter().next().is_none() {
         return Err(PdfOpsError::Range(PageRangeError::NoPages));
