@@ -106,6 +106,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Refuse to publish while carrying a [patch.crates-io] override
+        # cargo silently strips [patch] tables when packaging, so the
+        # published crate would build against the unpatched dependency
+        # and lose the fix the patch carries. Fail loudly instead.
+        run: |
+          if grep -q '^\[patch\.crates-io\]' Cargo.toml; then
+            echo "Cargo.toml carries a [patch.crates-io] override; the" >&2
+            echo "published crate would silently drop it. Upstream the" >&2
+            echo "patched dependency before publishing to crates.io." >&2
+            exit 1
+          fi
+
       - name: Check if version is already on crates.io
         id: check
         run: |
