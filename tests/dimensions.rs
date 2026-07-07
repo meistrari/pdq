@@ -421,12 +421,13 @@ fn dimensions_cli_requires_password_for_user_password_input() {
 }
 
 /// The acceptance criterion from issue #33: for every page,
-/// `width`/`height` × (dpi/72) must equal the pixel size `pdq render`
-/// produces at that dpi.
+/// `floor(width × (dpi/72))` in f32 — hayro's own arithmetic — must equal
+/// the pixel size `pdq render` produces at that dpi. The DPI set includes
+/// 150, 200, and 300, where f32 and f64 disagree on a 612×792 Letter page.
 #[cfg(feature = "render")]
 #[test]
 fn dimensions_match_render_pixel_sizes() {
-    use pdq::{render_pages, RenderOptions};
+    use pdq::{render_pages, PageRangeGroup, RenderOptions};
 
     let png_dimensions = |path: &Path| {
         let bytes = std::fs::read(path)
@@ -462,24 +463,34 @@ fn dimensions_match_render_pixel_sizes() {
         ],
     );
 
-    for input in [&mixed, &fixture("11-pages.pdf")] {
+    // The Letter fixture renders only page 1 to keep high-dpi renders cheap.
+    let letter = fixture("11-pages.pdf");
+    for (input, range) in [(&mixed, None), (&letter, Some("1"))] {
         let pages = page_dimensions(input).unwrap();
-        for dpi in [72.0f32, 144.0] {
+        let selected: Vec<usize> = match range {
+            Some(_) => vec![1],
+            None => (1..=pages.len()).collect(),
+        };
+        for dpi in [72.0f32, 96.0, 144.0, 150.0, 200.0, 300.0] {
             let out = tempdir().unwrap();
             let pattern = out.path().join("page-%d.png");
             render_pages(
                 input,
                 pattern.to_str().unwrap(),
-                &RenderOptions { dpi, pages: None },
+                &RenderOptions {
+                    dpi,
+                    pages: range.map(|range| PageRangeGroup::parse(range).unwrap()),
+                },
             )
             .unwrap();
 
             let width = pages.len().to_string().len();
-            for (index, page) in pages.iter().enumerate() {
-                let path =
-                    out.path()
-                        .join(format!("page-{:0width$}.png", index + 1, width = width));
+            for &page_number in &selected {
+                let page = &pages[page_number - 1];
+                let path = out.path().join(format!("page-{page_number:0width$}.png"));
                 let (pixel_width, pixel_height) = png_dimensions(&path);
+                // hayro multiplies f32 width by f32 dpi/72 and floors the
+                // (exactly widened) product.
                 let scale = dpi / 72.0;
                 assert_eq!(
                     (pixel_width, pixel_height),
@@ -487,10 +498,13 @@ fn dimensions_match_render_pixel_sizes() {
                         ((page.width * scale) as f64).floor() as u32,
                         ((page.height * scale) as f64).floor() as u32,
                     ),
-                    "page {} of {} at {dpi} dpi",
-                    index + 1,
+                    "page {page_number} of {} at {dpi} dpi",
                     input.display(),
                 );
+                if input == &letter && dpi == 150.0 {
+                    // f64 arithmetic would predict 1275×1650 here.
+                    assert_eq!((pixel_width, pixel_height), (1275, 1649));
+                }
             }
         }
     }
