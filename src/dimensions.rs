@@ -28,8 +28,11 @@ const NEARLY_ZERO: f32 = 1.0 / (1 << 12) as f32;
 /// with `/Rotate` already applied, plus the normalized rotation itself.
 ///
 /// `width`/`height` equal hayro's `Page::render_dimensions`, so a render at
-/// `dpi` produces a `floor(width * dpi / 72)` × `floor(height * dpi / 72)`
-/// pixel image of the page.
+/// `dpi` produces a pixel image of exactly
+/// `floor(width * (dpi / 72.0))` × `floor(height * (dpi / 72.0))`, both
+/// steps in `f32` — the same single-precision arithmetic hayro renders
+/// with. Double precision predicts 1px too many at some DPIs (150, 200,
+/// 300 on a 612×792 Letter page).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageDimensions {
     /// Visible width in PDF points (already swapped with `height` when the
@@ -50,8 +53,8 @@ pub struct PageDimensions {
 /// never touched. The effective box is CropBox intersected with MediaBox
 /// (CropBox defaulting to MediaBox), `/Rotate` of 90/270 swaps width and
 /// height, and both attributes are resolved through page-tree inheritance —
-/// exactly the geometry hayro uses for `render`, so `width * dpi / 72`
-/// (floored) is the pixel width `render` produces at `dpi`.
+/// exactly the geometry hayro uses for `render`, so `width * (dpi / 72.0)`
+/// in `f32`, floored, is the pixel width `render` produces at `dpi`.
 ///
 /// Damage is tolerated per page rather than failing the document: a missing
 /// or malformed box falls back to the inherited value, then A4; a missing or

@@ -171,9 +171,14 @@ large documents:
 applied — a page rotated 90 or 270 reports swapped width and height — and
 the effective box is CropBox intersected with MediaBox, exactly the geometry
 `render` uses. That makes the numbers safe to lay out a viewer before any
-page is rendered: a render at `DPI` produces an image of
-`floor(width × DPI/72)` × `floor(height × DPI/72)` pixels. `rotation` is
-normalized to 0, 90, 180, or 270.
+page is rendered: a render at `DPI` produces an image of exactly
+`floor(width × (DPI/72))` × `floor(height × (DPI/72))` pixels, both steps
+computed in single-precision (f32) arithmetic — in JavaScript,
+`Math.floor(Math.fround(width * Math.fround(dpi / 72)))`. The precision
+matters: the same formula in doubles predicts 1px too many on one axis at
+some DPIs — on a US Letter page at 150, 200, or 300 DPI (612×792 pt at
+150 DPI really renders 1275×1649, not the 1275×1650 doubles suggest).
+`rotation` is normalized to 0, 90, 180, or 270.
 
 Mixed-size documents report each page's true size, and per-page damage
 degrades gracefully: a missing or malformed box falls back to the inherited
