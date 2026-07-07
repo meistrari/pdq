@@ -24,6 +24,9 @@ enum Command {
     PageCount(PageCountArgs),
     #[cfg(feature = "render")]
     Render(RenderArgs),
+    /// Extract positioned text runs as JSON (points at 72 dpi, top-left origin)
+    #[cfg(feature = "text")]
+    Text(TextArgs),
 }
 
 #[derive(Debug, Args)]
@@ -102,6 +105,20 @@ struct RenderArgs {
     pages: Option<String>,
 }
 
+#[cfg(feature = "text")]
+#[derive(Debug, Args)]
+struct TextArgs {
+    input: PathBuf,
+
+    /// Page ranges to extract (same syntax as render); all pages when omitted
+    #[arg(long, value_name = "RANGES")]
+    pages: Option<String>,
+
+    /// Password for encrypted inputs
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
+}
+
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -158,6 +175,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 pages: args.pages.map(PageRangeGroup::parse).transpose()?,
             };
             pdq::render_pages(&args.input, &args.output, &options)?;
+        }
+        #[cfg(feature = "text")]
+        Command::Text(args) => {
+            let options = pdq::ExtractTextOptions {
+                pages: args.pages.map(PageRangeGroup::parse).transpose()?,
+                password: args.password,
+            };
+            let pages = pdq::extract_text(&args.input, &options)?;
+            println!("{}", pdq::text::pages_to_json(&pages));
         }
     }
     Ok(())

@@ -1127,11 +1127,13 @@ dependencies = [
  "dhat",
  "flate2",
  "hayro",
+ "kurbo",
  "lopdf",
  "memchr",
  "memmap2",
  "predicates",
  "rayon",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

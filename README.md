@@ -5,7 +5,8 @@
 [![license](https://img.shields.io/crates/l/pdq.svg)](LICENSE)
 [![MSRV](https://img.shields.io/crates/msrv/pdq)](#feature-flags-and-msrv)
 
-**PDF split, merge, page-count, and render — pretty damn quick.** A single
+**PDF split, merge, page-count, render, and text extraction — pretty damn
+quick.** A single
 pure-Rust binary and library: no C dependencies, no external tools, no
 subprocesses.
 
@@ -78,6 +79,9 @@ pdq merge --output merged.pdf a.pdf b.pdf c.pdf
 
 # Rasterize to PNG at 300 DPI
 pdq render --output 'page-%d.png' --dpi 300 --pages 1-10 input.pdf
+
+# Positioned text runs as JSON (for a selectable text layer)
+pdq text --pages 1 input.pdf
 ```
 
 Errors print a single `error: ...` line to stderr and exit non-zero, so pdq
@@ -166,6 +170,49 @@ original, zero-padded page number, so `--pages 1,3` writes `page-01.png` and
 [Feature flags and MSRV](#feature-flags-and-msrv)). hayro's parser opens
 owner-password-only files, but `render` has no `--password` option, so PDFs
 with a real user password cannot be rendered.
+
+### `pdq text` — positioned text runs as JSON
+
+```sh
+pdq text [--pages RANGES] [--password PW] input.pdf
+```
+
+Extracts each selected page's text runs with their positions, using the same
+hayro interpreter `render` uses, and prints a JSON array to stdout:
+
+```json
+[
+  {
+    "page": 1,
+    "page_width": 612,
+    "page_height": 792,
+    "degraded": false,
+    "runs": [
+      { "text": "Invoice", "x": 72, "y": 57.6, "font_size": 18 }
+    ]
+  }
+]
+```
+
+- Coordinates are PDF points (px at 72 dpi), origin top-left, with `/Rotate`
+  and cropbox applied exactly as `render` applies them — overlaying the runs
+  on a `pdq render` image of the same page only requires multiplying by the
+  display scale.
+- `font_size` is the on-page glyph height in points, derived from the
+  composed transform (like pdf.js's text-layer math), not the nominal `Tf`
+  size.
+- `x` is the baseline origin of the run's first glyph; `y` is the
+  approximate glyph top (baseline minus 0.8 × `font_size`).
+- A scanned/image-only page succeeds with `"runs": []`.
+- **`degraded: true`** flags pages where at least one visible glyph could
+  not be mapped to Unicode (it is emitted as U+FFFD instead of being
+  silently dropped) — the caller can distinguish "extraction failed" from
+  "no text on page", which pdf.js's `getTextContent` cannot signal.
+- Invisible text (render mode 3, e.g. OCR layers under scanned pages) is
+  extracted; annotation appearance streams are not.
+
+`text` is behind the `text` cargo feature (on by default) and, unlike
+`render`, takes `--password` for encrypted inputs.
 
 ### Page ranges
 
@@ -379,20 +426,22 @@ Encrypted inputs go through the `*_with_password` variants
 (`split_with_password`, `page_count_with_password`, ...) or the options
 structs (`SplitPagesOptions`, `MergeOptions`). Rendering is
 `pdq::render_pages` with `RenderOptions { dpi, pages }`, behind the `render`
-feature.
+feature. Text extraction is `pdq::extract_text` with `ExtractTextOptions
+{ pages, password }`, returning `Vec<PageText>`, behind the `text` feature.
 
 ### Feature flags and MSRV
 
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `render` | yes | `pdq render` / `pdq::render_pages` via hayro |
+| `text` | yes | `pdq text` / `pdq::extract_text` via hayro |
 
 Build with `--no-default-features` for a smaller split/merge-only binary.
 Minimum supported Rust version: **1.92**.
 
 ## Scope
 
-pdq is built around the split/merge/count/render workflow and does it
+pdq is built around the split/merge/count/render/text workflow and does it
 completely: encrypted inputs, damaged-xref repair, object streams, hybrid
 xrefs, and the long tail of real-world files its test corpus covers. It is
 not a general PDF rewriting toolkit:

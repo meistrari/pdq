@@ -11,6 +11,8 @@ mod repair;
 mod scan;
 pub mod split;
 mod split_template;
+#[cfg(feature = "text")]
+pub mod text;
 mod write;
 mod xrefboot;
 
@@ -26,6 +28,8 @@ pub use split::{
     split, split_pages, split_pages_with_options, split_pages_with_password, split_with_password,
     SplitOutput, SplitPagesOptions,
 };
+#[cfg(feature = "text")]
+pub use text::{extract_text, ExtractTextOptions, PageText, TextRun};
 
 pub type Result<T> = std::result::Result<T, PdfOpsError>;
 
