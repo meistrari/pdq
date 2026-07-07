@@ -152,6 +152,37 @@ fn rotated_page_matches_render_geometry() {
 }
 
 #[test]
+fn kerned_word_gaps_synthesize_spaces() {
+    let pages = extract_all("text-kerned-spaces.pdf");
+    let texts: Vec<&str> = pages[0].runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        ["Scaled Dot-Product Attention", "Hello world", "Kern gap"]
+    );
+}
+
+/// Real-world check against a LaTeX PDF whose word gaps are all TJ offsets.
+/// Skips silently unless PDQ_ATTENTION_PDF points at arXiv 1706.03762.
+#[test]
+fn attention_pdf_multiword_search_finds_phrase() {
+    let Some(path) = std::env::var_os("PDQ_ATTENTION_PDF") else {
+        eprintln!("skipping: PDQ_ATTENTION_PDF not set");
+        return;
+    };
+    let options = ExtractTextOptions {
+        pages: Some(PageRangeGroup::parse("3-4".to_string()).unwrap()),
+        ..Default::default()
+    };
+    let pages = extract_text(Path::new(&path), &options).unwrap();
+    let hit = pages.iter().flat_map(|p| &p.runs).any(|r| {
+        r.text
+            .to_lowercase()
+            .contains("scaled dot-product attention")
+    });
+    assert!(hit, "phrase not found in any run on pages 3-4");
+}
+
+#[test]
 fn image_only_page_yields_empty_runs_without_degraded() {
     let pages = extract_all("text-image-only.pdf");
     assert_eq!(pages.len(), 1);

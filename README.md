@@ -203,6 +203,10 @@ hayro interpreter `render` uses, and prints a JSON array to stdout:
   size.
 - `x` is the baseline origin of the run's first glyph; `y` is the
   approximate glyph top (baseline minus 0.8 × `font_size`).
+- Word gaps encoded as TJ kerning offsets instead of space glyphs (LaTeX
+  output) are synthesized as spaces, like poppler and pdf.js do: a gap of
+  0.1–0.6 em past a glyph's advance becomes `' '`, anything wider starts a
+  new run.
 - A scanned/image-only page succeeds with `"runs": []`.
 - **`degraded: true`** flags pages where at least one visible glyph could
   not be mapped to Unicode (it is emitted as U+FFFD instead of being

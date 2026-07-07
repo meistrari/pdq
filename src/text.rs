@@ -26,6 +26,15 @@ use crate::{
 const ASCENT_FACTOR: f64 = 0.8;
 /// hayro glyph transforms take font units (thousandths of an em) as input.
 const FONT_UNITS_PER_EM: f64 = 1000.0;
+/// Gap past a glyph's advance (in em) that reads as a word space rather than
+/// kerning or tracking, synthesized as ' ' for PDFs that encode word gaps as
+/// TJ offsets instead of space glyphs (LaTeX). Poppler's `minWordBreakSpace`
+/// and pdf.js's `SPACE_IN_FLOW_MIN_FACTOR` both sit near 0.1 em; kerning
+/// pairs stay well below it, word spaces (~0.2-0.5 em) well above.
+const WORD_GAP_MIN: f64 = 0.1;
+/// Widest gap still treated as an in-flow word space (pdf.js's
+/// `SPACE_IN_FLOW_MAX_FACTOR`); anything wider starts a new run.
+const WORD_GAP_MAX: f64 = 0.6;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtractTextOptions {
@@ -172,27 +181,31 @@ impl TextDevice {
         }
     }
 
-    fn continues_current(&self, origin: Point, font_size: f64, up: Vec2, dir: Vec2) -> bool {
-        let Some(current) = &self.current else {
-            return false;
-        };
+    /// Whether the glyph at `origin` continues the current run; `Some(true)`
+    /// means it continues after a word-sized gap (synthesize a space).
+    fn continues_current(&self, origin: Point, font_size: f64, up: Vec2, dir: Vec2) -> Option<bool> {
+        let current = self.current.as_ref()?;
         if (font_size - current.font_size).abs() > 0.02 * current.font_size
             || current.dir.dot(dir) < 0.99
             || current.up.dot(up) < 0.99
         {
-            return false;
+            return None;
         }
-        let (reference, gap_range) = match current.expected {
-            Some(expected) => (expected, (-0.25, 0.35)),
+        let (reference, gap_range, has_advance) = match current.expected {
+            Some(expected) => (expected, (-0.25, WORD_GAP_MAX), true),
             // Without advance metrics (Type3 fonts), measure from the
             // previous origin and accept anything up to a wide glyph plus
-            // a word gap.
-            None => (current.last_origin, (-0.05, 1.6)),
+            // a word gap; the glyph width is indistinguishable from the
+            // gap, so no space can be synthesized.
+            None => (current.last_origin, (-0.05, 1.6), false),
         };
         let delta = origin - reference;
         let along = delta.dot(current.dir) / current.font_size;
         let perpendicular = delta.dot(current.up) / current.font_size;
-        perpendicular.abs() <= 0.15 && along >= gap_range.0 && along <= gap_range.1
+        if perpendicular.abs() > 0.15 || along < gap_range.0 || along > gap_range.1 {
+            return None;
+        }
+        Some(has_advance && along >= WORD_GAP_MIN)
     }
 }
 
@@ -249,8 +262,14 @@ impl<'a> Device<'a> for TextDevice {
         };
         let expected = advance.map(|a| origin + a);
 
-        if self.continues_current(origin, font_size, up, dir) {
+        if let Some(word_gap) = self.continues_current(origin, font_size, up, dir) {
             let current = self.current.as_mut().unwrap();
+            if word_gap
+                && !current.text.ends_with(char::is_whitespace)
+                && !text.starts_with(char::is_whitespace)
+            {
+                current.text.push(' ');
+            }
             current.text.push_str(&text);
             current.last_origin = origin;
             current.expected = expected;
