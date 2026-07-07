@@ -80,6 +80,14 @@ fn extracts_positioned_runs_from_simple_page() {
     // baseline - 0.8 * font_size.
     assert!((invoice.y - 57.6).abs() < 0.1, "invoice.y = {}", invoice.y);
     assert!((invoice.font_size - 18.0).abs() < 0.1);
+    // Sum of Helvetica advances for "Invoice" is 3168/1000 em.
+    let expected_width = 3168.0 / 1000.0 * 18.0;
+    assert!(
+        (invoice.width - expected_width).abs() < 1.0,
+        "invoice.width = {}, expected {expected_width}",
+        invoice.width
+    );
+    assert!((invoice.height - 18.0).abs() < 0.1, "{}", invoice.height);
 
     let hello = &page.runs[1];
     assert!((hello.x - 72.0).abs() < 0.1);
@@ -121,6 +129,28 @@ fn extracted_geometry_matches_rendered_ink() {
 
     // The first run starts at the leftmost ink.
     assert!((runs[0].x - min_x as f32).abs() < 2.5);
+
+    // The union of the run boxes covers all rendered ink.
+    let union_min_x = runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+    let union_min_y = runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let union_max_x = runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max);
+    let union_max_y = runs.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
+    assert!(
+        union_min_x as f64 <= min_x + 1.0,
+        "{union_min_x} vs {min_x}"
+    );
+    assert!(
+        union_min_y as f64 <= min_y + 1.0,
+        "{union_min_y} vs {min_y}"
+    );
+    assert!(
+        union_max_x as f64 >= max_x - 1.0,
+        "{union_max_x} vs {max_x}"
+    );
+    assert!(
+        union_max_y as f64 >= max_y - 1.0,
+        "{union_max_y} vs {max_y}"
+    );
 }
 
 #[test]
@@ -136,19 +166,26 @@ fn rotated_page_matches_render_geometry() {
 
     let run = &page.runs[0];
     let (min_x, min_y, max_x, max_y) = ink_bbox("text-rotate90.pdf", 0);
-    assert!(
-        run.x >= (min_x - 2.0) as f32 && run.x <= (max_x + 2.0) as f32,
-        "x={} outside rotated ink x range [{min_x}, {max_x}]",
-        run.x
-    );
-    assert!(
-        run.y as f64 >= min_y - run.font_size as f64 && run.y as f64 <= max_y + 2.0,
-        "y={} outside rotated ink y range [{min_y}, {max_y}]",
-        run.y
-    );
-    // Rotated text advances along the page-space y axis, so the run's origin
-    // must sit at the ink's vertical extremity rather than the horizontal one.
+    // Rotated text advances along the page-space y axis, so the ink is
+    // taller than it is wide.
     assert!((max_y - min_y) > (max_x - min_x));
+
+    // The box follows the vertical advance: tall and narrow, one em wide,
+    // and covering the rendered ink.
+    assert!(run.height > run.width, "{}x{}", run.width, run.height);
+    assert!((run.width - run.font_size).abs() < 0.1, "{}", run.width);
+    assert!(run.x as f64 <= min_x + 1.0, "{} vs {min_x}", run.x);
+    assert!(run.y as f64 <= min_y + 1.0, "{} vs {min_y}", run.y);
+    assert!(
+        (run.x + run.width) as f64 >= max_x - 1.0,
+        "{} vs {max_x}",
+        run.x + run.width
+    );
+    assert!(
+        (run.y + run.height) as f64 >= max_y - 1.0,
+        "{} vs {max_y}",
+        run.y + run.height
+    );
 }
 
 #[test]
@@ -245,6 +282,8 @@ fn text_cli_outputs_parseable_json_array() {
     assert_eq!(runs[0]["text"], "Invoice");
     assert!(runs[0]["x"].is_number());
     assert!(runs[0]["y"].is_number());
+    assert!(runs[0]["width"].is_number());
+    assert!(runs[0]["height"].is_number());
     assert!(runs[0]["font_size"].is_number());
 }
 

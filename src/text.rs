@@ -44,12 +44,17 @@ pub struct ExtractTextOptions {
 
 /// A horizontal (or uniformly-oriented) sequence of glyphs positioned on the
 /// page. Coordinates are PDF points at 72 dpi with a top-left origin, after
-/// the same rotation and cropbox handling `render` applies.
+/// the same rotation and cropbox handling `render` applies. `x`/`y` is the
+/// top-left of the run's axis-aligned bounding box; for horizontal text
+/// `width` is the sum of glyph advances and `height` equals `font_size`,
+/// while rotated/vertical text yields a narrow, tall box.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextRun {
     pub text: String,
     pub x: f32,
     pub y: f32,
+    pub width: f32,
+    pub height: f32,
     pub font_size: f32,
 }
 
@@ -142,7 +147,10 @@ fn extract_page<'a>(page: &Page<'a>, page_number: usize, cache: &InterpreterCach
 
 struct RunState {
     text: String,
-    anchor: Point,
+    /// Baseline origin of the first glyph.
+    start: Point,
+    /// Baseline point past the last glyph's advance.
+    end: Point,
     font_size: f64,
     /// Unit vector pointing from the baseline toward the glyph top.
     up: Vec2,
@@ -171,10 +179,27 @@ impl TextDevice {
     fn flush(&mut self) {
         if let Some(run) = self.current.take() {
             if !run.text.trim().is_empty() {
+                let ascent = run.up * (ASCENT_FACTOR * run.font_size);
+                let descent = run.up * ((ASCENT_FACTOR - 1.0) * run.font_size);
+                let corners = [
+                    run.start + ascent,
+                    run.start + descent,
+                    run.end + ascent,
+                    run.end + descent,
+                ];
+                let (mut min, mut max) = (corners[0], corners[0]);
+                for corner in &corners[1..] {
+                    min.x = min.x.min(corner.x);
+                    min.y = min.y.min(corner.y);
+                    max.x = max.x.max(corner.x);
+                    max.y = max.y.max(corner.y);
+                }
                 self.runs.push(TextRun {
                     text: run.text,
-                    x: run.anchor.x as f32,
-                    y: run.anchor.y as f32,
+                    x: min.x as f32,
+                    y: min.y as f32,
+                    width: (max.x - min.x) as f32,
+                    height: (max.y - min.y) as f32,
                     font_size: run.font_size as f32,
                 });
             }
@@ -183,7 +208,13 @@ impl TextDevice {
 
     /// Whether the glyph at `origin` continues the current run; `Some(true)`
     /// means it continues after a word-sized gap (synthesize a space).
-    fn continues_current(&self, origin: Point, font_size: f64, up: Vec2, dir: Vec2) -> Option<bool> {
+    fn continues_current(
+        &self,
+        origin: Point,
+        font_size: f64,
+        up: Vec2,
+        dir: Vec2,
+    ) -> Option<bool> {
         let current = self.current.as_ref()?;
         if (font_size - current.font_size).abs() > 0.02 * current.font_size
             || current.dir.dot(dir) < 0.99
@@ -261,6 +292,9 @@ impl<'a> Device<'a> for TextDevice {
             Glyph::Type3(_) => None,
         };
         let expected = advance.map(|a| origin + a);
+        // Without an advance, estimate the glyph's extent as half an em so
+        // the box still covers most of the final glyph.
+        let end = expected.unwrap_or(origin + dir * (0.5 * font_size));
 
         if let Some(word_gap) = self.continues_current(origin, font_size, up, dir) {
             let current = self.current.as_mut().unwrap();
@@ -273,11 +307,13 @@ impl<'a> Device<'a> for TextDevice {
             current.text.push_str(&text);
             current.last_origin = origin;
             current.expected = expected;
+            current.end = end;
         } else {
             self.flush();
             self.current = Some(RunState {
                 text,
-                anchor: origin + em_y * ASCENT_FACTOR,
+                start: origin,
+                end,
                 font_size,
                 up,
                 dir,
@@ -316,10 +352,12 @@ pub fn pages_to_json(pages: &[PageText]) -> String {
                 out.push(',');
             }
             out.push_str(&format!(
-                "{{\"text\":\"{}\",\"x\":{},\"y\":{},\"font_size\":{}}}",
+                "{{\"text\":\"{}\",\"x\":{},\"y\":{},\"width\":{},\"height\":{},\"font_size\":{}}}",
                 escape_json(&run.text),
                 format_number(run.x),
                 format_number(run.y),
+                format_number(run.width),
+                format_number(run.height),
                 format_number(run.font_size)
             ));
         }
@@ -382,13 +420,16 @@ mod tests {
                 text: "Invoice".to_string(),
                 x: 72.0,
                 y: 70.5,
+                width: 57.0,
+                height: 18.0,
                 font_size: 18.0,
             }],
         }];
         assert_eq!(
             pages_to_json(&pages),
             "[{\"page\":1,\"page_width\":612,\"page_height\":792,\"degraded\":false,\
-             \"runs\":[{\"text\":\"Invoice\",\"x\":72,\"y\":70.5,\"font_size\":18}]}]"
+             \"runs\":[{\"text\":\"Invoice\",\"x\":72,\"y\":70.5,\
+             \"width\":57,\"height\":18,\"font_size\":18}]}]"
         );
     }
 }

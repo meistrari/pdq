@@ -188,7 +188,7 @@ hayro interpreter `render` uses, and prints a JSON array to stdout:
     "page_height": 792,
     "degraded": false,
     "runs": [
-      { "text": "Invoice", "x": 72, "y": 57.6, "font_size": 18 }
+      { "text": "Invoice", "x": 72, "y": 57.6, "width": 57.024, "height": 18, "font_size": 18 }
     ]
   }
 ]
@@ -201,8 +201,12 @@ hayro interpreter `render` uses, and prints a JSON array to stdout:
 - `font_size` is the on-page glyph height in points, derived from the
   composed transform (like pdf.js's text-layer math), not the nominal `Tf`
   size.
-- `x` is the baseline origin of the run's first glyph; `y` is the
-  approximate glyph top (baseline minus 0.8 × `font_size`).
+- `x`, `y`, `width`, `height` are the run's axis-aligned bounding box,
+  top-left first — a client can draw it as a highlight rectangle directly.
+  For horizontal text `x` is the baseline origin of the first glyph, `y` the
+  approximate glyph top (baseline minus 0.8 × `font_size`), `width` the sum
+  of glyph advances, and `height` equals `font_size`; text made vertical by
+  `/Rotate` yields a narrow, tall box instead.
 - Word gaps encoded as TJ kerning offsets instead of space glyphs (LaTeX
   output) are synthesized as spaces, like poppler and pdf.js do: a gap of
   0.1–0.6 em past a glyph's advance becomes `' '`, anything wider starts a
