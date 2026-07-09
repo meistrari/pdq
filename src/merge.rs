@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
+    io::BufWriter,
     path::{Path, PathBuf},
     process,
 };
@@ -176,7 +177,7 @@ pub(crate) fn merge_whole_inputs_streaming(
 /// next to `output` and rename it into place on success.
 fn write_streaming_output(
     output: &Path,
-    fill: impl FnOnce(&mut StreamingPdfWriter) -> Result<()>,
+    fill: impl FnOnce(&mut StreamingPdfWriter<BufWriter<File>>) -> Result<()>,
 ) -> Result<()> {
     let temp_output = temp_output_path(output)?;
     let result = (|| {
@@ -185,7 +186,7 @@ fn write_streaming_output(
         writer.finish()
     })();
     match result {
-        Ok(()) => {
+        Ok(_) => {
             fs::rename(&temp_output, output)?;
             Ok(())
         }
@@ -197,7 +198,7 @@ fn write_streaming_output(
 }
 
 fn append_whole_source(
-    writer: &mut StreamingPdfWriter,
+    writer: &mut StreamingPdfWriter<BufWriter<File>>,
     source: &PdfSource<'_>,
     page_ids: &[lopdf::ObjectId],
 ) -> Result<()> {
