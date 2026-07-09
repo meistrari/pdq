@@ -24,7 +24,10 @@ pub use count::{
     page_count_from_bytes_with_password, page_count_with_password,
 };
 pub use dimensions::{page_dimensions, page_dimensions_with_password, PageDimensions};
-pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
+pub use merge::{
+    merge, merge_from_bytes, merge_from_bytes_with_options, merge_with_options, MergeBytesInput,
+    MergeBytesOptions, MergeInput, MergeOptions,
+};
 pub use range::{PageRangeError, PageRangeGroup};
 #[cfg(feature = "render")]
 pub use render::{render_pages, render_pages_from_bytes, RenderOptions, RenderedPage};

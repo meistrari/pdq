@@ -2,10 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pdq::{
-    page_count, page_count_fast, page_count_fast_from_bytes,
-    page_count_fast_from_bytes_with_password, page_count_fast_with_password, page_count_from_bytes,
-    page_count_from_bytes_with_password, page_count_with_password, split_from_bytes,
-    split_pages_from_bytes, PageRangeGroup, SplitBytesOutput, SplitPagesOptions,
+    merge_from_bytes, merge_from_bytes_with_options, page_count, page_count_fast,
+    page_count_fast_from_bytes, page_count_fast_from_bytes_with_password,
+    page_count_fast_with_password, page_count_from_bytes, page_count_from_bytes_with_password,
+    page_count_with_password, split_from_bytes, split_pages_from_bytes, MergeBytesInput,
+    PageRangeError, PageRangeGroup, PdfOpsError, SplitBytesOutput, SplitPagesOptions,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -184,4 +185,73 @@ fn render_pages_from_bytes_matches_path_api() {
         assert_eq!(&page.png, &written);
         assert!(page.width > 0 && page.height > 0);
     }
+}
+
+#[test]
+fn merge_from_bytes_combines_whole_inputs() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+
+    let inputs = [
+        MergeBytesInput {
+            bytes: bytes.clone(),
+            ranges: Vec::new(),
+        },
+        MergeBytesInput {
+            bytes: bytes.clone(),
+            ranges: Vec::new(),
+        },
+    ];
+
+    let merged = merge_from_bytes(&inputs).unwrap();
+    assert_eq!(page_count_from_bytes(&merged).unwrap(), 22);
+}
+
+#[test]
+fn merge_from_bytes_applies_page_ranges() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+
+    let inputs = [
+        MergeBytesInput {
+            bytes: bytes.clone(),
+            ranges: vec![PageRangeGroup::parse("1-2".to_string()).unwrap()],
+        },
+        MergeBytesInput {
+            bytes: bytes.clone(),
+            ranges: vec![PageRangeGroup::parse("3".to_string()).unwrap()],
+        },
+    ];
+
+    let merged = merge_from_bytes(&inputs).unwrap();
+    assert_eq!(page_count_from_bytes(&merged).unwrap(), 3);
+}
+
+#[test]
+fn merge_from_bytes_rejects_empty_inputs() {
+    let err = merge_from_bytes(&[]).unwrap_err();
+    assert!(matches!(err, PdfOpsError::Range(PageRangeError::NoPages)));
+}
+
+#[test]
+fn merge_from_bytes_with_options_accepts_password() {
+    let path = fixture("user-password.pdf");
+    let bytes = fs::read(&path).unwrap();
+
+    let inputs = [MergeBytesInput {
+        bytes,
+        ranges: Vec::new(),
+    }];
+
+    let merged = merge_from_bytes_with_options(
+        &inputs,
+        pdq::MergeBytesOptions {
+            password: Some("user".to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        page_count_from_bytes(&merged).unwrap(),
+        page_count_with_password(&path, Some("user")).unwrap()
+    );
 }

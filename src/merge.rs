@@ -17,6 +17,8 @@ use crate::{
     PdfOpsError, Result,
 };
 
+const MEMORY_INPUT_LABEL_PREFIX: &str = "<memory:";
+
 #[derive(Debug, Clone)]
 pub struct MergeInput {
     pub path: PathBuf,
@@ -109,6 +111,133 @@ pub fn merge_with_options(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MergeBytesInput {
+    pub bytes: Vec<u8>,
+    pub ranges: Vec<PageRangeGroup>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MergeBytesOptions {
+    /// Password used to decrypt encrypted inputs. The empty user password is
+    /// always tried first, so owner-password-only files merge without this.
+    /// Outputs are always written unencrypted.
+    pub password: Option<String>,
+}
+
+pub fn merge_from_bytes(inputs: &[MergeBytesInput]) -> Result<Vec<u8>> {
+    merge_from_bytes_with_options(inputs, MergeBytesOptions::default())
+}
+
+/// Like [`merge`], but takes in-memory PDFs instead of file paths and returns
+/// the merged PDF as owned bytes instead of writing to disk. Every input is
+/// always rewritten through the same page-copy path (ranged or not) so
+/// decrypt/repair semantics stay consistent for the browser caller — unlike
+/// the path API, there is no whole-single-input byte-copy fast path.
+pub fn merge_from_bytes_with_options(
+    inputs: &[MergeBytesInput],
+    options: MergeBytesOptions,
+) -> Result<Vec<u8>> {
+    if inputs.is_empty() {
+        return Err(PdfOpsError::Range(PageRangeError::NoPages));
+    }
+    let password = options.password.as_deref();
+
+    if inputs.iter().all(|input| input.ranges.is_empty()) {
+        return merge_whole_bytes_inputs_streaming(inputs, password);
+    }
+
+    let mut force_repair: BTreeSet<usize> = BTreeSet::new();
+    'attempt: loop {
+        let mut target = empty_document();
+        let mut merged_pages = Vec::new();
+
+        for (index, input) in inputs.iter().enumerate() {
+            let label = memory_input_label(index);
+            let source = open_merge_source(
+                &input.bytes,
+                &label,
+                password,
+                force_repair.contains(&index),
+            )?;
+            let copied = (|| {
+                let pages = source.page_ids()?;
+                let page_ids = resolve_merge_page_ids_for_ranges(&pages, &input.ranges)?;
+                copy_pages_with_options(
+                    &source,
+                    &mut target,
+                    &page_ids,
+                    CopyOptions {
+                        prune_resources: !input.ranges.is_empty(),
+                        ..CopyOptions::default()
+                    },
+                )
+            })();
+            match copied {
+                Ok(pages) => merged_pages.extend(pages),
+                Err(err) if is_offset_damage(&err) && !source.repaired() => {
+                    force_repair.insert(index);
+                    continue 'attempt;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        finish_pages(&mut target, &merged_pages)?;
+        let mut pdf = Vec::new();
+        target.save_to(&mut pdf)?;
+        return Ok(pdf);
+    }
+}
+
+fn merge_whole_bytes_inputs_streaming(
+    inputs: &[MergeBytesInput],
+    password: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut force_repair: BTreeSet<usize> = BTreeSet::new();
+    loop {
+        let mut failed_index = None;
+        let mut writer = StreamingPdfWriter::new(Vec::new())?;
+        let result = (|| {
+            for (index, input) in inputs.iter().enumerate() {
+                let label = memory_input_label(index);
+                let source = open_merge_source(
+                    &input.bytes,
+                    &label,
+                    password,
+                    force_repair.contains(&index),
+                )?;
+                let appended = (|| {
+                    let page_ids = source.page_ids()?;
+                    if page_ids.is_empty() {
+                        return Err(PdfOpsError::Range(PageRangeError::NoPages));
+                    }
+                    append_whole_source(&mut writer, &source, &page_ids)
+                })();
+                if let Err(err) = appended {
+                    if !source.repaired() {
+                        failed_index = Some(index);
+                    }
+                    return Err(err);
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Err(err) if is_offset_damage(&err) => match failed_index {
+                Some(index) if force_repair.insert(index) => continue,
+                _ => return Err(err),
+            },
+            Err(err) => return Err(err),
+            Ok(()) => return writer.finish(),
+        }
+    }
+}
+
+fn memory_input_label(index: usize) -> PathBuf {
+    PathBuf::from(format!("{MEMORY_INPUT_LABEL_PREFIX}{index}>"))
+}
+
 /// Open one merge input, forcing xref reconstruction for inputs a previous
 /// attempt proved damaged. A forced reconstruction that fails is a hard
 /// error: the damage is already established, there is nothing to fall back
@@ -197,8 +326,8 @@ fn write_streaming_output(
     }
 }
 
-fn append_whole_source(
-    writer: &mut StreamingPdfWriter<BufWriter<File>>,
+fn append_whole_source<W: std::io::Write>(
+    writer: &mut StreamingPdfWriter<W>,
     source: &PdfSource<'_>,
     page_ids: &[lopdf::ObjectId],
 ) -> Result<()> {
@@ -296,15 +425,22 @@ fn resolve_merge_page_ids(
     page_ids: &[lopdf::ObjectId],
     input: &MergeInput,
 ) -> Result<Vec<lopdf::ObjectId>> {
+    resolve_merge_page_ids_for_ranges(page_ids, &input.ranges)
+}
+
+fn resolve_merge_page_ids_for_ranges(
+    page_ids: &[lopdf::ObjectId],
+    ranges: &[PageRangeGroup],
+) -> Result<Vec<lopdf::ObjectId>> {
     if page_ids.is_empty() {
         return Err(PdfOpsError::Range(PageRangeError::NoPages));
     }
-    if input.ranges.is_empty() {
+    if ranges.is_empty() {
         return Ok(page_ids.to_vec());
     }
 
     let mut resolved = Vec::new();
-    for range in &input.ranges {
+    for range in ranges {
         for page_number in range.resolve(page_ids.len())? {
             let page_id = page_ids.get(page_number - 1).copied().ok_or_else(|| {
                 PdfOpsError::InvalidStructure(format!("missing page {page_number}"))
