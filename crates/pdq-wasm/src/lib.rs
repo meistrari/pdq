@@ -58,7 +58,7 @@ pub fn version() -> String {
 }
 
 #[wasm_bindgen(js_name = pageCount)]
-pub fn page_count(input: &[u8], password: Option<String>, strict: bool) -> Result<usize, JsValue> {
+pub fn page_count(input: &[u8], strict: bool, password: Option<String>) -> Result<usize, JsValue> {
     let password = password.as_deref();
     if strict {
         pdq::page_count_from_bytes_with_password(input, password).map_err(map_error)
@@ -215,5 +215,11 @@ mod tests {
     #[test]
     fn parse_ranges_rejects_an_invalid_entry() {
         assert!(parse_ranges(&["1-2".to_string(), "".to_string()]).is_err());
+    }
+
+    #[test]
+    fn page_count_accepts_no_password_fast_call_shape() {
+        let bytes = include_bytes!("../../../tests/fixtures/11-pages.pdf");
+        assert_eq!(page_count(bytes, false, None).unwrap(), 11);
     }
 }

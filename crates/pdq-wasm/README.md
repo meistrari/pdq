@@ -21,7 +21,7 @@ are strings using pdq's [page range syntax](../../README.md#page-ranges)
 unencrypted input.
 
 - `version(): string` — the crate version.
-- `pageCount(input: Uint8Array, password?: string, strict: boolean): number`
+- `pageCount(input: Uint8Array, strict: boolean, password?: string): number`
   — page count. `strict: false` trusts the document's `/Count` (fast);
   `strict: true` forces the validated page-tree walk pdq's `split`/
   `split-pages` use, immune to lying metadata.
@@ -67,7 +67,7 @@ import init, { pageCount, renderPages, split } from "pdq-wasm";
 async function run(bytes) {
   await init();
 
-  const pages = pageCount(bytes, undefined, false);
+  const pages = pageCount(bytes, false);
 
   const rendered = renderPages(bytes, "1-3", 150);
   for (const { page, width, height, png } of rendered) {
