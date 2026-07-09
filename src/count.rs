@@ -72,21 +72,23 @@ pub fn page_count_fast_from_bytes_with_password(
 }
 
 fn count_impl(input: &[u8], label: &Path, password: Option<&str>, strict: bool) -> Result<usize> {
+    // Instant::now() panics on wasm32-unknown-unknown, so only touch the
+    // clock when timing is requested (env vars are absent on wasm).
     let timing = std::env::var_os("PDQ_TIMING").is_some();
-    let start = std::time::Instant::now();
+    let start = timing.then(std::time::Instant::now);
     // Damaged inputs whose xref lies about offsets get one retry against a
     // reconstructed table; the closure re-runs (and re-logs) in that case.
     with_repair_retry(input, label, password, |source| {
-        if timing {
+        if let Some(start) = start {
             eprintln!("phase parse: {:?}", start.elapsed());
         }
-        let count_start = std::time::Instant::now();
+        let count_start = timing.then(std::time::Instant::now);
         let count = if strict {
             source.count_pages()
         } else {
             source.count_pages_fast()
         };
-        if timing {
+        if let Some(count_start) = count_start {
             let phase = if strict { "walk" } else { "count" };
             eprintln!("phase {phase}: {:?}", count_start.elapsed());
         }
