@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use pdq::{
     page_count, page_count_fast, page_count_fast_from_bytes,
     page_count_fast_from_bytes_with_password, page_count_fast_with_password, page_count_from_bytes,
-    page_count_from_bytes_with_password, page_count_with_password,
+    page_count_from_bytes_with_password, page_count_with_password, split_from_bytes,
+    split_pages_from_bytes, PageRangeGroup, SplitBytesOutput, SplitPagesOptions,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -56,6 +57,66 @@ fn page_count_fast_from_bytes_with_password_matches_path_api() {
         page_count_fast_from_bytes_with_password(&bytes, Some("user")).unwrap(),
         page_count_fast_with_password(&path, Some("user")).unwrap()
     );
+}
+
+#[test]
+fn split_from_bytes_returns_requested_range() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+
+    let outputs = split_from_bytes(
+        &bytes,
+        &[SplitBytesOutput {
+            range: PageRangeGroup::parse("1-3".to_string()).unwrap(),
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].index, 0);
+    assert_eq!(page_count_from_bytes(&outputs[0].pdf).unwrap(), 3);
+}
+
+#[test]
+fn split_pages_from_bytes_one_per_page() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+
+    let outputs = split_pages_from_bytes(
+        &bytes,
+        &SplitPagesOptions {
+            pages_per_file: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outputs.len(), 11);
+    for (index, output) in outputs.iter().enumerate() {
+        assert_eq!(output.index, index);
+        assert_eq!(page_count_from_bytes(&output.pdf).unwrap(), 1);
+    }
+}
+
+#[test]
+fn split_pages_from_bytes_chunks_of_five() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+
+    let outputs = split_pages_from_bytes(
+        &bytes,
+        &SplitPagesOptions {
+            pages_per_file: 5,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let page_counts: Vec<usize> = outputs
+        .iter()
+        .map(|output| page_count_from_bytes(&output.pdf).unwrap())
+        .collect();
+    assert_eq!(page_counts, vec![5, 5, 1]);
 }
 
 #[cfg(feature = "text")]

@@ -16,10 +16,23 @@ use crate::{
     PdfOpsError, Result,
 };
 
+const MEMORY_INPUT_LABEL: &str = "<memory>";
+
 #[derive(Debug, Clone)]
 pub struct SplitOutput {
     pub range: PageRangeGroup,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitBytesOutput {
+    pub range: PageRangeGroup,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfBytesOutput {
+    pub index: usize,
+    pub pdf: Vec<u8>,
 }
 
 pub fn split(input: &Path, outputs: &[SplitOutput]) -> Result<()> {
@@ -110,6 +123,30 @@ pub fn split_with_password(
     run_split_outputs(&source, &resolved_outputs)
 }
 
+/// Like [`split`], but takes an in-memory PDF instead of a file path and
+/// returns each output as owned bytes instead of writing to disk.
+pub fn split_from_bytes(input: &[u8], outputs: &[SplitBytesOutput]) -> Result<Vec<PdfBytesOutput>> {
+    split_from_bytes_with_password(input, outputs, None)
+}
+
+/// Like [`split_with_password`], but takes an in-memory PDF instead of a file
+/// path and returns each output as owned bytes instead of writing to disk.
+pub fn split_from_bytes_with_password(
+    input: &[u8],
+    outputs: &[SplitBytesOutput],
+    password: Option<&str>,
+) -> Result<Vec<PdfBytesOutput>> {
+    with_repair_retry(input, Path::new(MEMORY_INPUT_LABEL), password, |source| {
+        let ordered_pages = source.page_ids()?;
+        if ordered_pages.is_empty() {
+            return Err(PdfOpsError::Range(PageRangeError::NoPages));
+        }
+        let pages: BTreeMap<u32, lopdf::ObjectId> = (1u32..).zip(ordered_pages).collect();
+        let resolved_outputs = resolve_split_bytes_outputs(outputs, &pages)?;
+        run_split_bytes_outputs(source, &resolved_outputs)
+    })
+}
+
 /// Unbounded split through the lazy source: the fallback when the eager
 /// parse fails or cannot be trusted. Fetch errors that prove the xref lies
 /// re-run the split against a reconstructed table.
@@ -174,6 +211,63 @@ fn resolve_split_outputs(
             })
         })
         .collect()
+}
+
+struct ResolvedSplitBytesOutput {
+    index: usize,
+    page_ids: Vec<lopdf::ObjectId>,
+    prune_resources: bool,
+}
+
+fn resolve_split_bytes_outputs(
+    outputs: &[SplitBytesOutput],
+    pages: &BTreeMap<u32, lopdf::ObjectId>,
+) -> Result<Vec<ResolvedSplitBytesOutput>> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| {
+            let page_numbers = output.range.resolve(pages.len())?;
+            let page_ids = resolve_page_ids(pages, &page_numbers)?;
+            // Same pruning rule as the path API's whole-document rewrite:
+            // skip pruning only when the output keeps every page.
+            let prune_resources = page_ids.iter().collect::<BTreeSet<_>>().len() < pages.len();
+            Ok(ResolvedSplitBytesOutput {
+                index,
+                page_ids,
+                prune_resources,
+            })
+        })
+        .collect()
+}
+
+fn run_split_bytes_outputs(
+    source: &(impl ObjectSource + Sync),
+    outputs: &[ResolvedSplitBytesOutput],
+) -> Result<Vec<PdfBytesOutput>> {
+    let run_one = |output: &ResolvedSplitBytesOutput| -> Result<PdfBytesOutput> {
+        let mut target = empty_document();
+        let options = CopyOptions {
+            prune_resources: output.prune_resources,
+            ..CopyOptions::default()
+        };
+        let copied_pages = copy_pages_with_options(source, &mut target, &output.page_ids, options)?;
+        finish_pages(&mut target, &copied_pages)?;
+        let mut pdf = Vec::new();
+        target.save_to(&mut pdf)?;
+        Ok(PdfBytesOutput {
+            index: output.index,
+            pdf,
+        })
+    };
+
+    let pool = rayon::ThreadPoolBuilder::new().build();
+    let mut results = match pool {
+        Ok(pool) => pool.install(|| outputs.par_iter().map(run_one).collect::<Result<Vec<_>>>())?,
+        Err(_) => outputs.iter().map(run_one).collect::<Result<Vec<_>>>()?,
+    };
+    results.sort_by_key(|output| output.index);
+    Ok(results)
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +360,85 @@ pub fn split_pages_with_options(
 
         run_split_outputs(source, &resolved_outputs)
     })
+}
+
+/// Like [`split_pages_with_options`], but takes an in-memory PDF instead of a
+/// file path and returns each chunk as owned bytes instead of writing to
+/// disk.
+pub fn split_pages_from_bytes(
+    input: &[u8],
+    options: &SplitPagesOptions,
+) -> Result<Vec<PdfBytesOutput>> {
+    if options.pages_per_file == 0 {
+        return Err(PdfOpsError::InvalidStructure(
+            "pages-per-file must be at least 1".into(),
+        ));
+    }
+
+    with_repair_retry(
+        input,
+        Path::new(MEMORY_INPUT_LABEL),
+        options.password.as_deref(),
+        |source| {
+            let pages = source.page_ids()?;
+            if pages.is_empty() {
+                return Err(PdfOpsError::Range(PageRangeError::NoPages));
+            }
+            let resolved_outputs: Vec<ResolvedSplitBytesOutput> = pages
+                .chunks(options.pages_per_file)
+                .enumerate()
+                .map(|(index, chunk)| ResolvedSplitBytesOutput {
+                    index,
+                    page_ids: chunk.to_vec(),
+                    prune_resources: true,
+                })
+                .collect();
+
+            if options.pages_per_file == 1 {
+                if let Some(template) = SinglePageTemplate::prepare(source, &pages) {
+                    return run_template_bytes_outputs(source, &template, &resolved_outputs);
+                }
+            }
+
+            run_split_bytes_outputs(source, &resolved_outputs)
+        },
+    )
+}
+
+fn run_template_bytes_outputs(
+    source: &(impl ObjectSource + Sync),
+    template: &SinglePageTemplate,
+    outputs: &[ResolvedSplitBytesOutput],
+) -> Result<Vec<PdfBytesOutput>> {
+    let run_one =
+        |buffer: &mut Vec<u8>, output: &ResolvedSplitBytesOutput| -> Result<PdfBytesOutput> {
+            let pdf = template
+                .page_bytes(source, output.page_ids[0], buffer)?
+                .to_vec();
+            Ok(PdfBytesOutput {
+                index: output.index,
+                pdf,
+            })
+        };
+
+    let pool = rayon::ThreadPoolBuilder::new().build();
+    let mut results = match pool {
+        Ok(pool) => pool.install(|| {
+            outputs
+                .par_iter()
+                .map_init(Vec::new, |buffer, output| run_one(buffer, output))
+                .collect::<Result<Vec<_>>>()
+        })?,
+        Err(_) => {
+            let mut buffer = Vec::new();
+            outputs
+                .iter()
+                .map(|output| run_one(&mut buffer, output))
+                .collect::<Result<Vec<_>>>()?
+        }
+    };
+    results.sort_by_key(|output| output.index);
+    Ok(results)
 }
 
 /// Concurrent output-file writes allowed during a template split; see
