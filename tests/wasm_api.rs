@@ -16,6 +16,42 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Swap the 10-digit offsets of the first two in-use entries of the last
+/// classic xref table, so both entries point at the wrong object while the
+/// table stays perfectly parseable — the fetch-time damage class exercised
+/// by the merge retry loops (see tests/repair.rs).
+fn swap_first_two_xref_offsets(bytes: &[u8]) -> Vec<u8> {
+    let table = bytes
+        .windows(5)
+        .rposition(|window| window == b"\nxref")
+        .expect("classic xref table not found");
+    let mut positions = Vec::new();
+    let mut pos = table;
+    while positions.len() < 2 && pos + 20 <= bytes.len() {
+        if bytes[pos..].starts_with(b"0")
+            && bytes[pos..pos + 10].iter().all(u8::is_ascii_digit)
+            && &bytes[pos + 10..pos + 11] == b" "
+            && &bytes[pos + 16..pos + 18] == b" n"
+        {
+            positions.push(pos);
+            pos += 20;
+        } else {
+            pos += 1;
+        }
+    }
+    let [first, second] = positions[..] else {
+        panic!("fewer than two in-use xref entries found");
+    };
+    let mut damaged = bytes.to_vec();
+    let (a, b) = (
+        bytes[first..first + 10].to_vec(),
+        bytes[second..second + 10].to_vec(),
+    );
+    damaged[first..first + 10].copy_from_slice(&b);
+    damaged[second..second + 10].copy_from_slice(&a);
+    damaged
+}
+
 #[test]
 fn page_count_from_bytes_matches_path_api() {
     let path = fixture("11-pages.pdf");
@@ -254,4 +290,46 @@ fn merge_from_bytes_with_options_accepts_password() {
         page_count_from_bytes(&merged).unwrap(),
         page_count_with_password(&path, Some("user")).unwrap()
     );
+}
+
+#[test]
+fn merge_from_bytes_repairs_damaged_input_with_ranges() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+    let damaged = swap_first_two_xref_offsets(&bytes);
+
+    let inputs = [
+        MergeBytesInput {
+            bytes: damaged,
+            ranges: vec![PageRangeGroup::parse("1-3".to_string()).unwrap()],
+        },
+        MergeBytesInput {
+            bytes: bytes.clone(),
+            ranges: vec![PageRangeGroup::parse("1-2".to_string()).unwrap()],
+        },
+    ];
+
+    let merged = merge_from_bytes(&inputs).unwrap();
+    assert_eq!(page_count_from_bytes(&merged).unwrap(), 5);
+}
+
+#[test]
+fn merge_from_bytes_repairs_damaged_input_without_ranges() {
+    let path = fixture("11-pages.pdf");
+    let bytes = fs::read(&path).unwrap();
+    let damaged = swap_first_two_xref_offsets(&bytes);
+
+    let inputs = [
+        MergeBytesInput {
+            bytes: damaged,
+            ranges: Vec::new(),
+        },
+        MergeBytesInput {
+            bytes: bytes.clone(),
+            ranges: Vec::new(),
+        },
+    ];
+
+    let merged = merge_from_bytes(&inputs).unwrap();
+    assert_eq!(page_count_from_bytes(&merged).unwrap(), 22);
 }
