@@ -477,6 +477,14 @@ structs (`SplitPagesOptions`, `MergeOptions`). Rendering is
 feature. Text extraction is `pdq::extract_text` with `ExtractTextOptions
 { pages, password }`, returning `Vec<PageText>`, behind the `text` feature.
 
+## WebAssembly
+
+A wasm-bindgen wrapper in [`crates/pdq-wasm`](crates/pdq-wasm/README.md)
+exposes `pageCount`, `extractTextJson`, `renderPages`, `split`, `splitPages`,
+and `merge` to the browser and Web Workers, taking and returning
+`Uint8Array`s. See that package's README for the build command, full API,
+and usage notes (run it off the main thread; everything is in-memory).
+
 ### Feature flags and MSRV
 
 | Feature | Default | Effect |
