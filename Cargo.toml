@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/pdq-wasm"]
+resolver = "2"
+
 [package]
 name = "pdq"
 version = "0.3.1"

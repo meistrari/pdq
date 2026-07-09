@@ -1142,6 +1142,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdq-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "pdq",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
