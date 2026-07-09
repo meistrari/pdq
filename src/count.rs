@@ -2,6 +2,8 @@ use std::path::Path;
 
 use crate::{load::map_file, repair::with_repair_retry, Result};
 
+const MEMORY_INPUT_LABEL: &str = "<memory>";
+
 /// Count the pages in a PDF by walking the page tree (validated count).
 ///
 /// Uses the same lazy, mmap-backed reader as `split-pages` and counts via the
@@ -19,7 +21,19 @@ pub fn page_count(input: &Path) -> Result<usize> {
 /// Like [`page_count`], additionally decrypting encrypted inputs with
 /// `password` when the empty user password does not authenticate.
 pub fn page_count_with_password(input: &Path, password: Option<&str>) -> Result<usize> {
-    count_impl(input, password, true)
+    let mmap = map_file(input)?;
+    count_impl(&mmap, input, password, true)
+}
+
+/// Like [`page_count`], but takes an in-memory PDF instead of a file path.
+pub fn page_count_from_bytes(input: &[u8]) -> Result<usize> {
+    page_count_from_bytes_with_password(input, None)
+}
+
+/// Like [`page_count_with_password`], but takes an in-memory PDF instead of a
+/// file path.
+pub fn page_count_from_bytes_with_password(input: &[u8], password: Option<&str>) -> Result<usize> {
+    count_impl(input, Path::new(MEMORY_INPUT_LABEL), password, true)
 }
 
 /// Count the pages in a PDF by trusting the root `/Pages` `/Count` (fast count).
@@ -38,16 +52,31 @@ pub fn page_count_fast(input: &Path) -> Result<usize> {
 /// Like [`page_count_fast`], additionally decrypting encrypted inputs with
 /// `password` when the empty user password does not authenticate.
 pub fn page_count_fast_with_password(input: &Path, password: Option<&str>) -> Result<usize> {
-    count_impl(input, password, false)
+    let mmap = map_file(input)?;
+    count_impl(&mmap, input, password, false)
 }
 
-fn count_impl(input: &Path, password: Option<&str>, strict: bool) -> Result<usize> {
+/// Like [`page_count_fast`], but takes an in-memory PDF instead of a file
+/// path.
+pub fn page_count_fast_from_bytes(input: &[u8]) -> Result<usize> {
+    page_count_fast_from_bytes_with_password(input, None)
+}
+
+/// Like [`page_count_fast_with_password`], but takes an in-memory PDF instead
+/// of a file path.
+pub fn page_count_fast_from_bytes_with_password(
+    input: &[u8],
+    password: Option<&str>,
+) -> Result<usize> {
+    count_impl(input, Path::new(MEMORY_INPUT_LABEL), password, false)
+}
+
+fn count_impl(input: &[u8], label: &Path, password: Option<&str>, strict: bool) -> Result<usize> {
     let timing = std::env::var_os("PDQ_TIMING").is_some();
     let start = std::time::Instant::now();
-    let mmap = map_file(input)?;
     // Damaged inputs whose xref lies about offsets get one retry against a
     // reconstructed table; the closure re-runs (and re-logs) in that case.
-    with_repair_retry(&mmap, input, password, |source| {
+    with_repair_retry(input, label, password, |source| {
         if timing {
             eprintln!("phase parse: {:?}", start.elapsed());
         }

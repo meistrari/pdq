@@ -19,7 +19,9 @@ mod xrefboot;
 
 pub use copy::{CopyContext, CopyOptions};
 pub use count::{
-    page_count, page_count_fast, page_count_fast_with_password, page_count_with_password,
+    page_count, page_count_fast, page_count_fast_from_bytes,
+    page_count_fast_from_bytes_with_password, page_count_fast_with_password, page_count_from_bytes,
+    page_count_from_bytes_with_password, page_count_with_password,
 };
 pub use dimensions::{page_dimensions, page_dimensions_with_password, PageDimensions};
 pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
