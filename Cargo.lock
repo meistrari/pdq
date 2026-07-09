@@ -710,7 +710,7 @@ checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 [[package]]
 name = "hayro-cmap"
 version = "0.1.0"
-source = "git+https://github.com/henrycunh/hayro?branch=tint-transform-lut-0.7#c0612e9b8ab7aff164166aabbad175a6c150c6de"
+source = "git+https://github.com/Guiqft/hayro?branch=agl-glyph-names-0.7#edc06dc510ff1bb2332eb5953dc00528400e6bd6"
 dependencies = [
  "brotli",
  "hayro-postscript",
@@ -719,7 +719,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/henrycunh/hayro?branch=tint-transform-lut-0.7#c0612e9b8ab7aff164166aabbad175a6c150c6de"
+source = "git+https://github.com/Guiqft/hayro?branch=agl-glyph-names-0.7#edc06dc510ff1bb2332eb5953dc00528400e6bd6"
 dependencies = [
  "bitflags 2.13.0",
  "hayro-cmap",
@@ -756,7 +756,7 @@ dependencies = [
 [[package]]
 name = "hayro-postscript"
 version = "0.1.0"
-source = "git+https://github.com/henrycunh/hayro?branch=tint-transform-lut-0.7#c0612e9b8ab7aff164166aabbad175a6c150c6de"
+source = "git+https://github.com/Guiqft/hayro?branch=agl-glyph-names-0.7#edc06dc510ff1bb2332eb5953dc00528400e6bd6"
 
 [[package]]
 name = "hayro-syntax"
@@ -1127,11 +1127,13 @@ dependencies = [
  "dhat",
  "flate2",
  "hayro",
+ "kurbo",
  "lopdf",
  "memchr",
  "memmap2",
  "predicates",
  "rayon",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
