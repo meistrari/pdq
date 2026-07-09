@@ -77,6 +77,9 @@ pdq split input.pdf --out 1-3 intro.pdf --out 4-z rest.pdf
 # Concatenate files
 pdq merge --output merged.pdf a.pdf b.pdf c.pdf
 
+# Every page's size and rotation as JSON, without rendering
+pdq dimensions input.pdf
+
 # Rasterize to PNG at 300 DPI
 pdq render --output 'page-%d.png' --dpi 300 --pages 1-10 input.pdf
 
@@ -153,6 +156,37 @@ back to a validated page-tree walk when `/Count` is missing, malformed,
 negative, or implausibly large.
 Pass `--strict` to force the validated walk: it counts the exact leaf pages
 `split`/`split-pages` would resolve and is immune to lying metadata.
+
+### `pdq dimensions` — per-page geometry without rendering
+
+```sh
+pdq dimensions [--password PW] input.pdf
+```
+
+Prints every page's size and rotation as JSON on stdout, straight from the
+page tree — no rasterization, so it stays a cheap metadata walk even on very
+large documents:
+
+```json
+{"pages":2,"page_sizes":[{"width":419,"height":595,"rotation":0},{"width":340,"height":680,"rotation":90}]}
+```
+
+`width`/`height` are in PDF points (1/72 inch) with `/Rotate` already
+applied — a page rotated 90 or 270 reports swapped width and height — and
+the effective box is CropBox intersected with MediaBox, exactly the geometry
+`render` uses. That makes the numbers safe to lay out a viewer before any
+page is rendered: a render at `DPI` produces an image of exactly
+`floor(width × (DPI/72))` × `floor(height × (DPI/72))` pixels, both steps
+computed in single-precision (f32) arithmetic — in JavaScript,
+`Math.floor(Math.fround(width * Math.fround(dpi / 72)))`. The precision
+matters: the same formula in doubles predicts 1px too many on one axis at
+some DPIs — on a US Letter page at 150, 200, or 300 DPI (612×792 pt at
+150 DPI really renders 1275×1649, not the 1275×1650 doubles suggest).
+`rotation` is normalized to 0, 90, 180, or 270.
+
+Mixed-size documents report each page's true size, and per-page damage
+degrades gracefully: a missing or malformed box falls back to the inherited
+value, then to A4; a malformed `/Rotate` falls back to 0.
 
 ### `pdq render` — rasterize to PNG
 
@@ -247,8 +281,9 @@ outputs are always written unencrypted.
 Files encrypted with only an owner password — the overwhelmingly common
 "permissions" encryption — open with no flags at all, because the empty user
 password is tried first. Files that require a real password take
-`--password` on `split`, `split-pages`, `merge`, and `page-count`; a wrong
-password is reported as exactly that, not as a parse failure.
+`--password` on `split`, `split-pages`, `merge`, `page-count`, and
+`dimensions`; a wrong password is reported as exactly that, not as a parse
+failure.
 
 ## Damaged PDFs
 
@@ -395,6 +430,11 @@ fn main() -> pdq::Result<()> {
     // pdq::page_count is the validated page-tree walk.
     let pages = pdq::page_count_fast(Path::new("big.pdf"))?;
     println!("{pages} pages");
+
+    // Per-page size (points) and rotation, without rendering.
+    for page in pdq::page_dimensions(Path::new("big.pdf"))? {
+        println!("{} x {} pt", page.width, page.height);
+    }
 
     // Extract two ranges in one pass over the input.
     pdq::split(

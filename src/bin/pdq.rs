@@ -3,8 +3,8 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::{Args, Parser, Subcommand};
 use pdq::{
     merge_with_options, page_count_fast_with_password, page_count_with_password,
-    split_pages_with_options, split_with_password, MergeInput, MergeOptions, PageRangeGroup,
-    SplitOutput, SplitPagesOptions,
+    page_dimensions_with_password, split_pages_with_options, split_with_password, MergeInput,
+    MergeOptions, PageRangeGroup, SplitOutput, SplitPagesOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -22,6 +22,8 @@ enum Command {
     Merge(MergeArgs),
     /// Print the number of pages (trusts the root /Count like qpdf; --strict walks the page tree)
     PageCount(PageCountArgs),
+    /// Print each page's size in PDF points and rotation as JSON, without rendering
+    Dimensions(DimensionsArgs),
     #[cfg(feature = "render")]
     Render(RenderArgs),
     /// Extract positioned text runs as JSON (points at 72 dpi, top-left origin)
@@ -84,6 +86,15 @@ struct PageCountArgs {
     /// implausible /Count already falls back to this walk automatically)
     #[arg(long)]
     strict: bool,
+
+    /// Password for encrypted inputs
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct DimensionsArgs {
+    input: PathBuf,
 
     /// Password for encrypted inputs
     #[arg(long, value_name = "PASSWORD")]
@@ -168,6 +179,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("{count}");
         }
+        Command::Dimensions(args) => {
+            let pages = page_dimensions_with_password(&args.input, args.password.as_deref())?;
+            println!("{}", dimensions_json(&pages));
+        }
         #[cfg(feature = "render")]
         Command::Render(args) => {
             let options = pdq::RenderOptions {
@@ -204,4 +219,23 @@ fn parse_split_outputs(
 
 fn parse_merge_inputs(paths: Vec<PathBuf>) -> Vec<MergeInput> {
     paths.into_iter().map(MergeInput::all).collect()
+}
+
+fn dimensions_json(pages: &[pdq::PageDimensions]) -> String {
+    use std::fmt::Write;
+
+    let mut json = format!("{{\"pages\":{},\"page_sizes\":[", pages.len());
+    for (index, page) in pages.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        write!(
+            json,
+            "{{\"width\":{},\"height\":{},\"rotation\":{}}}",
+            page.width, page.height, page.rotation
+        )
+        .expect("writing to a String cannot fail");
+    }
+    json.push_str("]}");
+    json
 }

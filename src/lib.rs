@@ -1,5 +1,6 @@
 pub mod copy;
 pub mod count;
+pub mod dimensions;
 mod filter;
 pub mod lazy;
 pub mod load;
@@ -20,6 +21,7 @@ pub use copy::{CopyContext, CopyOptions};
 pub use count::{
     page_count, page_count_fast, page_count_fast_with_password, page_count_with_password,
 };
+pub use dimensions::{page_dimensions, page_dimensions_with_password, PageDimensions};
 pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
 pub use range::{PageRangeError, PageRangeGroup};
 #[cfg(feature = "render")]
