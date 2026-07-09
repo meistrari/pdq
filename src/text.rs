@@ -74,7 +74,7 @@ pub struct PageText {
 
 pub fn extract_text(input: &Path, options: &ExtractTextOptions) -> Result<Vec<PageText>> {
     let data = fs::read(input)?;
-    extract_text_from_bytes_with_label(&data, options, input)
+    extract_text_from_bytes_with_label(data, options, input)
 }
 
 /// Like [`extract_text`], but takes an in-memory PDF instead of a file path.
@@ -82,15 +82,15 @@ pub fn extract_text_from_bytes(
     input: &[u8],
     options: &ExtractTextOptions,
 ) -> Result<Vec<PageText>> {
-    extract_text_from_bytes_with_label(input, options, Path::new(MEMORY_INPUT_LABEL))
+    extract_text_from_bytes_with_label(input.to_vec(), options, Path::new(MEMORY_INPUT_LABEL))
 }
 
 fn extract_text_from_bytes_with_label(
-    input: &[u8],
+    input: Vec<u8>,
     options: &ExtractTextOptions,
     label: &Path,
 ) -> Result<Vec<PageText>> {
-    let pdf = load_pdf(input.to_vec(), options.password.as_deref(), label)?;
+    let pdf = load_pdf(input, options.password.as_deref(), label)?;
     let pages = pdf.pages();
 
     let selected = match &options.pages {

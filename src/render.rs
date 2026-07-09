@@ -45,7 +45,7 @@ pub struct RenderedPage {
 pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions) -> Result<()> {
     validate_output_pattern(output_pattern)?;
     let data = fs::read(input)?;
-    let plan = RenderPlan::new(&data, options, input)?;
+    let plan = RenderPlan::new(data, options, input)?;
 
     let render_one = |&page_number: &usize| -> Result<()> {
         let rendered = plan.render_page(page_number)?;
@@ -65,7 +65,7 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
 /// Like [`render_pages`], but takes an in-memory PDF and returns the
 /// rendered pages' PNG bytes instead of writing them to disk.
 pub fn render_pages_from_bytes(input: &[u8], options: &RenderOptions) -> Result<Vec<RenderedPage>> {
-    let plan = RenderPlan::new(input, options, Path::new(MEMORY_INPUT_LABEL))?;
+    let plan = RenderPlan::new(input.to_vec(), options, Path::new(MEMORY_INPUT_LABEL))?;
 
     match rayon::ThreadPoolBuilder::new().build() {
         Ok(pool) => pool.install(|| {
@@ -93,7 +93,7 @@ struct RenderPlan {
 }
 
 impl RenderPlan {
-    fn new(input: &[u8], options: &RenderOptions, label: &Path) -> Result<Self> {
+    fn new(input: Vec<u8>, options: &RenderOptions, label: &Path) -> Result<Self> {
         if !options.dpi.is_finite() || options.dpi <= 0.0 {
             return Err(PdfOpsError::InvalidStructure(format!(
                 "render dpi must be a positive number, got {}",
@@ -102,7 +102,7 @@ impl RenderPlan {
         }
         let scale = options.dpi / POINTS_PER_INCH;
 
-        let pdf = Pdf::new(input.to_vec()).map_err(|err| load_error(err, label))?;
+        let pdf = Pdf::new(input).map_err(|err| load_error(err, label))?;
         let page_count = pdf.pages().len();
 
         let selected = match &options.pages {
