@@ -45,68 +45,113 @@ pub struct RenderedPage {
 pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions) -> Result<()> {
     validate_output_pattern(output_pattern)?;
     let data = fs::read(input)?;
-    let (total_pages, rendered) = render_pages_from_bytes_with_label(&data, options, input)?;
-    let width = total_pages.to_string().len();
+    let plan = RenderPlan::new(&data, options, input)?;
 
-    for page in rendered {
+    let render_one = |&page_number: &usize| -> Result<()> {
+        let rendered = plan.render_page(page_number)?;
         fs::write(
-            render_output_pattern(output_pattern, page.page, width)?,
-            page.png,
+            render_output_pattern(output_pattern, rendered.page, plan.pad_width)?,
+            rendered.png,
         )?;
+        Ok(())
+    };
+
+    match rayon::ThreadPoolBuilder::new().build() {
+        Ok(pool) => pool.install(|| plan.selected.par_iter().try_for_each(render_one)),
+        Err(_) => plan.selected.iter().try_for_each(render_one),
     }
-    Ok(())
 }
 
 /// Like [`render_pages`], but takes an in-memory PDF and returns the
 /// rendered pages' PNG bytes instead of writing them to disk.
 pub fn render_pages_from_bytes(input: &[u8], options: &RenderOptions) -> Result<Vec<RenderedPage>> {
-    render_pages_from_bytes_with_label(input, options, Path::new(MEMORY_INPUT_LABEL))
-        .map(|(_, pages)| pages)
+    let plan = RenderPlan::new(input, options, Path::new(MEMORY_INPUT_LABEL))?;
+
+    match rayon::ThreadPoolBuilder::new().build() {
+        Ok(pool) => pool.install(|| {
+            plan.selected
+                .par_iter()
+                .map(|&page_number| plan.render_page(page_number))
+                .collect()
+        }),
+        Err(_) => plan
+            .selected
+            .iter()
+            .map(|&page_number| plan.render_page(page_number))
+            .collect(),
+    }
 }
 
-fn render_pages_from_bytes_with_label(
-    input: &[u8],
-    options: &RenderOptions,
-    label: &Path,
-) -> Result<(usize, Vec<RenderedPage>)> {
-    if !options.dpi.is_finite() || options.dpi <= 0.0 {
-        return Err(PdfOpsError::InvalidStructure(format!(
-            "render dpi must be a positive number, got {}",
-            options.dpi
-        )));
+struct RenderPlan {
+    pdf: Pdf,
+    selected: Vec<usize>,
+    pad_width: usize,
+    scale: f32,
+    dpi: f32,
+    interpreter_settings: InterpreterSettings,
+    render_settings: RenderSettings,
+}
+
+impl RenderPlan {
+    fn new(input: &[u8], options: &RenderOptions, label: &Path) -> Result<Self> {
+        if !options.dpi.is_finite() || options.dpi <= 0.0 {
+            return Err(PdfOpsError::InvalidStructure(format!(
+                "render dpi must be a positive number, got {}",
+                options.dpi
+            )));
+        }
+        let scale = options.dpi / POINTS_PER_INCH;
+
+        let pdf = Pdf::new(input.to_vec()).map_err(|err| load_error(err, label))?;
+        let page_count = pdf.pages().len();
+
+        let selected = match &options.pages {
+            Some(range) => dedupe_preserving_order(&range.resolve(page_count)?),
+            None => (1..=page_count).collect(),
+        };
+        let pad_width = page_count.to_string().len();
+
+        let interpreter_settings = InterpreterSettings::default();
+        let render_settings = RenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: WHITE,
+            ..Default::default()
+        };
+
+        Ok(Self {
+            pdf,
+            selected,
+            pad_width,
+            scale,
+            dpi: options.dpi,
+            interpreter_settings,
+            render_settings,
+        })
     }
-    let scale = options.dpi / POINTS_PER_INCH;
 
-    let pdf = Pdf::new(input.to_vec()).map_err(|err| load_error(err, label))?;
-    let pages = pdf.pages();
-
-    let selected = match &options.pages {
-        Some(range) => dedupe_preserving_order(&range.resolve(pages.len())?),
-        None => (1..=pages.len()).collect(),
-    };
-
-    let interpreter_settings = InterpreterSettings::default();
-    let render_settings = RenderSettings {
-        x_scale: scale,
-        y_scale: scale,
-        bg_color: WHITE,
-        ..Default::default()
-    };
-
-    let render_one = |&page_number: &usize| {
+    fn render_page(&self, page_number: usize) -> Result<RenderedPage> {
+        let pages = self.pdf.pages();
         let page = &pages[page_number - 1];
         let (page_width, page_height) = page.render_dimensions();
-        if page_width * scale > MAX_PIXMAP_DIMENSION || page_height * scale > MAX_PIXMAP_DIMENSION {
+        if page_width * self.scale > MAX_PIXMAP_DIMENSION
+            || page_height * self.scale > MAX_PIXMAP_DIMENSION
+        {
             return Err(PdfOpsError::Unsupported(format!(
                 "page {page_number} is too large to render at {} dpi",
-                options.dpi
+                self.dpi
             )));
         }
 
         // RenderCache is Rc-based and cannot cross threads; it only shares
         // work across pages, so a per-page cache costs almost nothing.
         let cache = RenderCache::new();
-        let pixmap = hayro::render(page, &cache, &interpreter_settings, &render_settings);
+        let pixmap = hayro::render(
+            page,
+            &cache,
+            &self.interpreter_settings,
+            &self.render_settings,
+        );
         let width = pixmap.width() as u32;
         let height = pixmap.height() as u32;
         let png = pixmap.into_png().map_err(|err| {
@@ -120,13 +165,7 @@ fn render_pages_from_bytes_with_label(
             height,
             png,
         })
-    };
-
-    let rendered: Result<Vec<RenderedPage>> = match rayon::ThreadPoolBuilder::new().build() {
-        Ok(pool) => pool.install(|| selected.par_iter().map(render_one).collect()),
-        Err(_) => selected.iter().map(render_one).collect(),
-    };
-    Ok((pages.len(), rendered?))
+    }
 }
 
 fn load_error(err: LoadPdfError, input: &Path) -> PdfOpsError {
