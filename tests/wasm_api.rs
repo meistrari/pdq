@@ -110,6 +110,9 @@ fn render_pages_from_bytes_matches_path_api() {
         from_bytes.iter().map(|p| p.page).collect::<Vec<_>>(),
         [2, 4]
     );
+    for page in &from_bytes {
+        assert!(page.png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
 
     let temp = tempfile::tempdir().unwrap();
     let pattern = temp.path().join("page-%d.png");
