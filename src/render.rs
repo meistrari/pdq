@@ -17,6 +17,7 @@ use crate::{
 const POINTS_PER_INCH: f32 = 72.0;
 // hayro pixmaps address pixels with u16 coordinates.
 const MAX_PIXMAP_DIMENSION: f32 = u16::MAX as f32;
+const MEMORY_INPUT_LABEL: &str = "<memory>";
 
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
@@ -33,8 +34,41 @@ impl Default for RenderOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedPage {
+    pub page: usize,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
 pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions) -> Result<()> {
     validate_output_pattern(output_pattern)?;
+    let data = fs::read(input)?;
+    let (total_pages, rendered) = render_pages_from_bytes_with_label(&data, options, input)?;
+    let width = total_pages.to_string().len();
+
+    for page in rendered {
+        fs::write(
+            render_output_pattern(output_pattern, page.page, width)?,
+            page.png,
+        )?;
+    }
+    Ok(())
+}
+
+/// Like [`render_pages`], but takes an in-memory PDF and returns the
+/// rendered pages' PNG bytes instead of writing them to disk.
+pub fn render_pages_from_bytes(input: &[u8], options: &RenderOptions) -> Result<Vec<RenderedPage>> {
+    render_pages_from_bytes_with_label(input, options, Path::new(MEMORY_INPUT_LABEL))
+        .map(|(_, pages)| pages)
+}
+
+fn render_pages_from_bytes_with_label(
+    input: &[u8],
+    options: &RenderOptions,
+    label: &Path,
+) -> Result<(usize, Vec<RenderedPage>)> {
     if !options.dpi.is_finite() || options.dpi <= 0.0 {
         return Err(PdfOpsError::InvalidStructure(format!(
             "render dpi must be a positive number, got {}",
@@ -43,15 +77,13 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
     }
     let scale = options.dpi / POINTS_PER_INCH;
 
-    let data = fs::read(input)?;
-    let pdf = Pdf::new(data).map_err(|err| load_error(err, input))?;
+    let pdf = Pdf::new(input.to_vec()).map_err(|err| load_error(err, label))?;
     let pages = pdf.pages();
 
     let selected = match &options.pages {
         Some(range) => dedupe_preserving_order(&range.resolve(pages.len())?),
         None => (1..=pages.len()).collect(),
     };
-    let width = pages.len().to_string().len();
 
     let interpreter_settings = InterpreterSettings::default();
     let render_settings = RenderSettings {
@@ -75,22 +107,26 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
         // work across pages, so a per-page cache costs almost nothing.
         let cache = RenderCache::new();
         let pixmap = hayro::render(page, &cache, &interpreter_settings, &render_settings);
+        let width = pixmap.width() as u32;
+        let height = pixmap.height() as u32;
         let png = pixmap.into_png().map_err(|err| {
             PdfOpsError::InvalidStructure(format!(
                 "failed to encode page {page_number} as PNG: {err}"
             ))
         })?;
-        fs::write(
-            render_output_pattern(output_pattern, page_number, width)?,
+        Ok(RenderedPage {
+            page: page_number,
+            width,
+            height,
             png,
-        )?;
-        Ok(())
+        })
     };
 
-    match rayon::ThreadPoolBuilder::new().build() {
-        Ok(pool) => pool.install(|| selected.par_iter().try_for_each(render_one)),
-        Err(_) => selected.iter().try_for_each(render_one),
-    }
+    let rendered: Result<Vec<RenderedPage>> = match rayon::ThreadPoolBuilder::new().build() {
+        Ok(pool) => pool.install(|| selected.par_iter().map(render_one).collect()),
+        Err(_) => selected.iter().map(render_one).collect(),
+    };
+    Ok((pages.len(), rendered?))
 }
 
 fn load_error(err: LoadPdfError, input: &Path) -> PdfOpsError {

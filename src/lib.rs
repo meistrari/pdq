@@ -27,13 +27,13 @@ pub use dimensions::{page_dimensions, page_dimensions_with_password, PageDimensi
 pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
 pub use range::{PageRangeError, PageRangeGroup};
 #[cfg(feature = "render")]
-pub use render::{render_pages, RenderOptions};
+pub use render::{render_pages, render_pages_from_bytes, RenderOptions, RenderedPage};
 pub use split::{
     split, split_pages, split_pages_with_options, split_pages_with_password, split_with_password,
     SplitOutput, SplitPagesOptions,
 };
 #[cfg(feature = "text")]
-pub use text::{extract_text, ExtractTextOptions, PageText, TextRun};
+pub use text::{extract_text, extract_text_from_bytes, ExtractTextOptions, PageText, TextRun};
 
 pub type Result<T> = std::result::Result<T, PdfOpsError>;
 
