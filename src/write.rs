@@ -17,8 +17,8 @@ use crate::{
 const INHERITABLE_PAGE_ATTRS: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
 const MAX_COPY_DEPTH: usize = 256;
 
-pub(crate) struct StreamingPdfWriter {
-    output: CountingWriter<BufWriter<File>>,
+pub(crate) struct StreamingPdfWriter<W: Write> {
+    output: CountingWriter<W>,
     offsets: BTreeMap<u32, u32>,
     max_id: u32,
     pages_id: ObjectId,
@@ -26,10 +26,9 @@ pub(crate) struct StreamingPdfWriter {
     pages: Vec<ObjectId>,
 }
 
-impl StreamingPdfWriter {
-    pub(crate) fn create(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
-        let mut output = CountingWriter::new(BufWriter::new(file));
+impl<W: Write> StreamingPdfWriter<W> {
+    pub(crate) fn new(output: W) -> Result<Self> {
+        let mut output = CountingWriter::new(output);
         output.write_all(b"%PDF-1.7\n%\xC7\xEC\x8F\xA2\n")?;
 
         let mut writer = Self {
@@ -69,7 +68,7 @@ impl StreamingPdfWriter {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self) -> Result<()> {
+    pub(crate) fn finish(mut self) -> Result<W> {
         let kids = self
             .pages
             .iter()
@@ -107,20 +106,27 @@ impl StreamingPdfWriter {
         write_dictionary(&mut self.output, &trailer)?;
         write!(self.output, "\nstartxref\n{xref_start}\n%%EOF")?;
         self.output.flush()?;
-        Ok(())
+        Ok(self.output.into_inner())
     }
 }
 
-pub(crate) struct StreamingCopyContext<'a> {
-    writer: &'a mut StreamingPdfWriter,
+impl StreamingPdfWriter<BufWriter<File>> {
+    pub(crate) fn create(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        StreamingPdfWriter::new(BufWriter::new(file))
+    }
+}
+
+pub(crate) struct StreamingCopyContext<'a, W: Write> {
+    writer: &'a mut StreamingPdfWriter<W>,
     object_map: BTreeMap<ObjectId, ObjectId>,
     inherited_attrs_cache: BTreeMap<ObjectId, Rc<InheritedPageAttrs>>,
     selected_pages: BTreeSet<ObjectId>,
     options: CopyOptions,
 }
 
-impl<'a> StreamingCopyContext<'a> {
-    pub(crate) fn new(writer: &'a mut StreamingPdfWriter, options: CopyOptions) -> Self {
+impl<'a, W: Write> StreamingCopyContext<'a, W> {
+    pub(crate) fn new(writer: &'a mut StreamingPdfWriter<W>, options: CopyOptions) -> Self {
         Self {
             writer,
             object_map: BTreeMap::new(),
@@ -615,6 +621,10 @@ impl<W: Write> CountingWriter<W> {
     fn bytes_written(&self) -> usize {
         self.bytes_written
     }
+
+    fn into_inner(self) -> W {
+        self.inner
+    }
 }
 
 impl<W: Write> Write for CountingWriter<W> {
@@ -631,5 +641,25 @@ impl<W: Write> Write for CountingWriter<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamingPdfWriter;
+
+    #[test]
+    fn streaming_writer_over_vec_produces_valid_pdf_bytes() {
+        let writer = StreamingPdfWriter::new(Vec::new()).unwrap();
+        let bytes = writer.finish().unwrap();
+
+        assert!(
+            bytes.starts_with(b"%PDF-"),
+            "output must start with a PDF header"
+        );
+        assert!(
+            bytes.windows(5).any(|window| window == b"%%EOF"),
+            "output must contain an EOF marker"
+        );
     }
 }

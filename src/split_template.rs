@@ -139,6 +139,21 @@ impl SinglePageTemplate {
         buffer: &mut Vec<u8>,
         gate: &WriteGate,
     ) -> Result<()> {
+        self.page_bytes(source, page_id, buffer)?;
+        let _permit = gate.acquire();
+        std::fs::write(path, &buffer)?;
+        Ok(())
+    }
+
+    /// Copy `page_id` onto the template and build a complete single-page PDF
+    /// into `buffer`, returning the finished bytes. `buffer` is caller-provided
+    /// scratch space so parallel workers can reuse allocations across outputs.
+    pub(crate) fn page_bytes<'b>(
+        &self,
+        source: &impl ObjectSource,
+        page_id: ObjectId,
+        buffer: &'b mut Vec<u8>,
+    ) -> Result<&'b [u8]> {
         let mut scratch = empty_document();
         scratch.max_id = self.shared_count;
         let mut context = CopyContext::with_state(
@@ -188,9 +203,7 @@ impl SinglePageTemplate {
         write_dictionary(buffer, &trailer)?;
         write!(buffer, "\nstartxref\n{xref_start}\n%%EOF")?;
 
-        let _permit = gate.acquire();
-        std::fs::write(path, &buffer)?;
-        Ok(())
+        Ok(buffer.as_slice())
     }
 }
 
@@ -370,6 +383,33 @@ mod tests {
                 format!("BT /F1 12 Tf 72 720 Td (Page {}) Tj ET", index + 1),
                 "output {} must carry its own page content",
                 index + 1
+            );
+        }
+    }
+
+    #[test]
+    fn page_bytes_matches_bytes_written_to_disk() {
+        let (doc, page_ids) = three_page_source();
+        let template =
+            SinglePageTemplate::prepare(&doc, &page_ids).expect("template should be prepared");
+
+        let temp = tempfile::tempdir().unwrap();
+        let gate = WriteGate::new(2);
+        let mut file_buffer = Vec::new();
+        let mut memory_buffer = Vec::new();
+        for (index, page_id) in page_ids.iter().enumerate() {
+            let path = temp.path().join(format!("page-{}.pdf", index + 1));
+            template
+                .write_page(&doc, *page_id, &path, &mut file_buffer, &gate)
+                .unwrap();
+            let on_disk = std::fs::read(&path).unwrap();
+
+            let bytes = template
+                .page_bytes(&doc, *page_id, &mut memory_buffer)
+                .unwrap();
+            assert_eq!(
+                bytes, on_disk,
+                "memory helper must return the same bytes written to disk"
             );
         }
     }

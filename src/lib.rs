@@ -19,19 +19,25 @@ mod xrefboot;
 
 pub use copy::{CopyContext, CopyOptions};
 pub use count::{
-    page_count, page_count_fast, page_count_fast_with_password, page_count_with_password,
+    page_count, page_count_fast, page_count_fast_from_bytes,
+    page_count_fast_from_bytes_with_password, page_count_fast_with_password, page_count_from_bytes,
+    page_count_from_bytes_with_password, page_count_with_password,
 };
 pub use dimensions::{page_dimensions, page_dimensions_with_password, PageDimensions};
-pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
+pub use merge::{
+    merge, merge_from_bytes, merge_from_bytes_with_options, merge_with_options, MergeBytesInput,
+    MergeBytesOptions, MergeInput, MergeOptions,
+};
 pub use range::{PageRangeError, PageRangeGroup};
 #[cfg(feature = "render")]
-pub use render::{render_pages, RenderOptions};
+pub use render::{render_pages, render_pages_from_bytes, RenderOptions, RenderedPage};
 pub use split::{
-    split, split_pages, split_pages_with_options, split_pages_with_password, split_with_password,
-    SplitOutput, SplitPagesOptions,
+    split, split_from_bytes, split_from_bytes_with_password, split_pages, split_pages_from_bytes,
+    split_pages_with_options, split_pages_with_password, split_with_password, PdfBytesOutput,
+    SplitBytesOutput, SplitOutput, SplitPagesOptions,
 };
 #[cfg(feature = "text")]
-pub use text::{extract_text, ExtractTextOptions, PageText, TextRun};
+pub use text::{extract_text, extract_text_from_bytes, ExtractTextOptions, PageText, TextRun};
 
 pub type Result<T> = std::result::Result<T, PdfOpsError>;
 
