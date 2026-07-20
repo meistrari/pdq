@@ -1790,7 +1790,10 @@ fn resolve_to_dict<'a>(document: &'a Document, value: &Object) -> &'a Dictionary
 }
 
 fn author_of(document: &Document) -> String {
-    let info = document.trailer.get(b"Info").expect("output must carry /Info");
+    let info = document
+        .trailer
+        .get(b"Info")
+        .expect("output must carry /Info");
     let author = resolve_to_dict(document, info).get(b"Author").unwrap();
     String::from_utf8_lossy(author.as_str().unwrap()).into_owned()
 }
@@ -1859,7 +1862,12 @@ fn split_preserves_document_metadata_and_sanitized_annotations() {
     assert_eq!(sig_widget.get(b"P").unwrap(), &Object::Reference(pages[&1]));
     let sig_dict = resolve_to_dict(&document, sig_widget.get(b"V").unwrap());
     assert_eq!(
-        sig_dict.get(b"ByteRange").unwrap().as_array().unwrap().len(),
+        sig_dict
+            .get(b"ByteRange")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
         4
     );
     let sig_ref = resolve_to_dict(
