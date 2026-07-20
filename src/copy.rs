@@ -451,6 +451,12 @@ impl CopyContext {
             Object::Dictionary(dict) => {
                 let mut copied = lopdf::Dictionary::new();
                 for (key, value) in dict {
+                    // Same /Kids drop as `copy_dictionary` (see the comment
+                    // there): field nodes reached from a sanitized subtree
+                    // must not drag sibling widgets from other pages along.
+                    if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
+                        continue;
+                    }
                     copied.set(
                         key,
                         self.copy_owned_value(source, target, value, depth + 1)?,
@@ -546,6 +552,19 @@ impl CopyContext {
         check_copy_depth(depth)?;
         let mut copied = Dictionary::new();
         for (key, value) in dict.iter() {
+            if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
+                // Inside a sanitized (annotation/metadata) subtree the only
+                // dictionaries carrying /Kids are AcroForm field nodes reached
+                // through a widget's /Parent — field nodes have no /Type, so
+                // the structure guard cannot catch them. Their /Kids lists the
+                // field's widgets across the WHOLE document; copying it would
+                // drag sibling widgets (and their appearance streams) from
+                // other pages into a subset output. Dropping /Kids keeps the
+                // field itself — crucially its /V signature value — while the
+                // output's own widget is already reachable via the page's
+                // /Annots.
+                continue;
+            }
             copied.set(
                 key.clone(),
                 self.copy_value(source, target, value, depth + 1)?,
@@ -590,26 +609,9 @@ impl CopyContext {
         result
     }
 
-    /// True when `id` resolves to document structure that a sanitized copy
-    /// must not follow. Pages already visited by this copy (the annotation's
-    /// own page via `/P`, or a sibling page of the same output) stay
-    /// referenceable through the object map; a page copied later in the same
-    /// output is conservatively nulled — that only affects intra-output
-    /// `/Dest` links, never page content.
+    /// See [`references_document_structure`].
     fn is_document_structure_ref(&self, source: &impl ObjectSource, id: ObjectId) -> bool {
-        if self.object_map.contains_key(&id) {
-            return false;
-        }
-        let Ok(object) = source.get_object_value(id) else {
-            return false;
-        };
-        let Ok(dict) = object.as_dict() else {
-            return false;
-        };
-        dict.has_type(b"Page")
-            || dict.has_type(b"Pages")
-            || dict.has_type(b"Catalog")
-            || dict.has_type(b"StructTreeRoot")
+        references_document_structure(source, &self.object_map, id)
     }
 
     /// Copy the source's document-level metadata objects — the trailer `/Info`
@@ -860,6 +862,33 @@ fn restore_object_mapping(
 
 fn is_form_xobject(dict: &Dictionary) -> bool {
     dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
+}
+
+/// True when `id` resolves to document structure that a sanitized copy must
+/// not follow. Pages already visited by the copy (the annotation's own page
+/// via `/P`, or a sibling page of the same output) stay referenceable through
+/// `object_map`; a page copied later in the same output is conservatively
+/// nulled — that only affects intra-output `/Dest` links, never page content.
+/// Shared by `CopyContext` and `StreamingCopyContext` so the structure-type
+/// list can never drift between the two.
+pub(crate) fn references_document_structure(
+    source: &impl ObjectSource,
+    object_map: &BTreeMap<ObjectId, ObjectId>,
+    id: ObjectId,
+) -> bool {
+    if object_map.contains_key(&id) {
+        return false;
+    }
+    let Ok(object) = source.get_object_value(id) else {
+        return false;
+    };
+    let Ok(dict) = object.as_dict() else {
+        return false;
+    };
+    dict.has_type(b"Page")
+        || dict.has_type(b"Pages")
+        || dict.has_type(b"Catalog")
+        || dict.has_type(b"StructTreeRoot")
 }
 
 /// Document-level metadata copied into a target by

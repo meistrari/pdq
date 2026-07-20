@@ -1952,3 +1952,133 @@ fn merge_takes_document_metadata_from_first_input() {
     assert!(xmp_content_of(&document).starts_with(b"<?xpacket"));
     QpdfValidator::detect().validate(&ranged, 3);
 }
+
+#[test]
+fn split_keeps_field_value_via_widget_parent_but_drops_field_kids() {
+    // A SPLIT signature field (value on the field node, widgets as /Kids on
+    // several pages): the widget's /Parent must stay followable — it carries
+    // the /V signature dictionary — but the field's /Kids would drag sibling
+    // widgets from other pages into the output, so it is dropped.
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("split-field.pdf");
+
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let page1_id = document.new_object_id();
+    let page2_id = document.new_object_id();
+    let field_id = document.new_object_id();
+
+    let sig_dict_id = document.add_object(dictionary! {
+        "Type" => "Sig",
+        "ByteRange" => Object::Array(vec![0.into(), 100.into(), 200.into(), 50.into()]),
+    });
+    let widget1_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+        "P" => Object::Reference(page1_id),
+        "Parent" => Object::Reference(field_id),
+    });
+    let widget2_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+        "P" => Object::Reference(page2_id),
+        "Parent" => Object::Reference(field_id),
+    });
+    document.objects.insert(
+        field_id,
+        dictionary! {
+            "FT" => "Sig",
+            "T" => Object::string_literal("assinatura"),
+            "V" => Object::Reference(sig_dict_id),
+            "Kids" => Object::Array(vec![
+                Object::Reference(widget1_id),
+                Object::Reference(widget2_id),
+            ]),
+        }
+        .into(),
+    );
+
+    for (page_id, widget_id) in [(page1_id, widget1_id), (page2_id, widget2_id)] {
+        let content_id = document.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"q Q".to_vec(),
+        )));
+        document.objects.insert(
+            page_id,
+            dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+                "Resources" => dictionary! {},
+                "Contents" => content_id,
+                "Annots" => Object::Array(vec![Object::Reference(widget_id)]),
+            }
+            .into(),
+        );
+    }
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![
+                Object::Reference(page1_id),
+                Object::Reference(page2_id),
+            ]),
+            "Count" => 2,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        catalog_id,
+        dictionary! { "Type" => "Catalog", "Pages" => pages_id }.into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document.save(&input).unwrap();
+
+    let output = temp.path().join("page-1.pdf");
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    let document = Document::load(&output).unwrap();
+    let pages = document.get_pages();
+    assert_eq!(pages.len(), 1);
+    let page = document.get_dictionary(pages[&1]).unwrap();
+    let annots = page.get(b"Annots").unwrap().as_array().unwrap();
+    let widget = resolve_to_dict(&document, &annots[0]);
+
+    // /Parent → field survives with the signature value…
+    let field = resolve_to_dict(&document, widget.get(b"Parent").unwrap());
+    let signature = resolve_to_dict(&document, field.get(b"V").unwrap());
+    assert_eq!(
+        signature
+            .get(b"ByteRange")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    // …but /Kids is dropped, and with it page 2's sibling widget.
+    assert!(field.get(b"Kids").is_err(), "field /Kids must be dropped");
+    let widget_count = document
+        .objects
+        .values()
+        .filter(|object| {
+            object.as_dict().is_ok_and(|dictionary| {
+                dictionary.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Widget")
+            })
+        })
+        .count();
+    assert_eq!(widget_count, 1, "sibling widgets must not leak");
+
+    QpdfValidator::detect().validate(&output, 1);
+}

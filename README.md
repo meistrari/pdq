@@ -121,7 +121,12 @@ digitally signed Brazilian court documents), the trailer `/Info` dictionary
 Annotation references back into document structure (`/Dest` arrays to pages
 outside the output, DocMDP `/Data` backreferences to the catalog) are
 replaced with `null` so they never pull unrelated pages — or the whole
-source document — into a page-subset output. Note that an embedded digital
+source document — into a page-subset output. Sanitization is single-pass, so
+within a multi-page output a GoTo link to a page copied *later* in that same
+output is also nulled (page content is never affected, only the link's
+destination). AcroForm field nodes reached through a widget's `/Parent` keep
+their field value (`/V` — the signature dictionary) but drop `/Kids`, which
+would otherwise drag the field's sibling widgets from other pages along. Note that an embedded digital
 signature survives as data but cannot stay *valid* on a page subset: its
 `/ByteRange` covers the original file's bytes, which any rewrite changes.
 `merge` follows the same rules, taking `/Info` and XMP from its first input.

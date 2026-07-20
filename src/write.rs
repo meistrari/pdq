@@ -10,7 +10,7 @@ use std::{
 use lopdf::{dictionary, Dictionary, Object, ObjectId, StringFormat};
 
 use crate::{
-    copy::{CopiedDocumentMetadata, CopyOptions, ObjectSource},
+    copy::{references_document_structure, CopiedDocumentMetadata, CopyOptions, ObjectSource},
     PdfOpsError, Result,
 };
 
@@ -202,21 +202,9 @@ impl<'a> StreamingCopyContext<'a> {
         result
     }
 
-    /// See `CopyContext::is_document_structure_ref`.
+    /// See [`references_document_structure`].
     fn is_document_structure_ref(&self, source: &impl ObjectSource, id: ObjectId) -> bool {
-        if self.object_map.contains_key(&id) {
-            return false;
-        }
-        let Ok(object) = source.get_object_value(id) else {
-            return false;
-        };
-        let Ok(dict) = object.as_dict() else {
-            return false;
-        };
-        dict.has_type(b"Page")
-            || dict.has_type(b"Pages")
-            || dict.has_type(b"Catalog")
-            || dict.has_type(b"StructTreeRoot")
+        references_document_structure(source, &self.object_map, id)
     }
 
     pub(crate) fn copy_pages(
@@ -388,6 +376,13 @@ impl<'a> StreamingCopyContext<'a> {
             Object::Dictionary(dict) => {
                 let mut copied = Dictionary::new();
                 for (key, value) in dict.iter() {
+                    // Same /Kids drop as CopyContext::copy_dictionary (see the
+                    // comment there): AcroForm field nodes reached from a
+                    // sanitized subtree must not drag sibling widgets from
+                    // other pages along.
+                    if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
+                        continue;
+                    }
                     copied.set(key.clone(), self.copy_value(source, value, depth + 1)?);
                 }
                 Ok(Object::Dictionary(copied))
@@ -429,6 +424,9 @@ impl<'a> StreamingCopyContext<'a> {
             Object::Dictionary(dict) => {
                 let mut copied = Dictionary::new();
                 for (key, value) in dict {
+                    if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
+                        continue;
+                    }
                     copied.set(key, self.copy_owned_value(source, value, depth + 1)?);
                 }
                 Ok(Object::Dictionary(copied))
