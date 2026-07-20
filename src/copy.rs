@@ -16,6 +16,14 @@ const RESOURCE_PRUNE_MIN_NAMES: usize = 6;
 
 pub(crate) trait ObjectSource {
     fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error>;
+
+    /// The source trailer's value for `key` (`/Info`, `/Root`), when the
+    /// source exposes a trailer. Used to carry document-level metadata into
+    /// outputs; sources that cannot provide one (test doubles) keep the
+    /// default.
+    fn trailer_value(&self, _key: &[u8]) -> Option<Object> {
+        None
+    }
 }
 
 /// Distilled inheritable page attributes per page-tree node. `Arc` (not `Rc`)
@@ -25,6 +33,10 @@ pub(crate) type InheritedAttrsCache = BTreeMap<ObjectId, Arc<InheritedPageAttrs>
 impl ObjectSource for Document {
     fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error> {
         Ok(Cow::Borrowed(self.get_object(id)?))
+    }
+
+    fn trailer_value(&self, key: &[u8]) -> Option<Object> {
+        self.trailer.get(key).ok().cloned()
     }
 }
 
@@ -37,7 +49,13 @@ pub struct CopyOptions {
 impl Default for CopyOptions {
     fn default() -> Self {
         Self {
-            copy_annotations: false,
+            // Annotations carry user-visible content — link targets, form
+            // widgets, and signature appearances (the gov.br stamp on Brazilian
+            // court documents) — so dropping them loses real page content.
+            // References back into document structure are sanitized during the
+            // copy (see `copy_sanitized_value`), which is what made copying
+            // them safe to enable.
+            copy_annotations: true,
             prune_resources: true,
         }
     }
@@ -52,6 +70,7 @@ pub struct CopyContext {
     selected_pages: BTreeSet<ObjectId>,
     options: CopyOptions,
     prune_nested_resources: bool,
+    sanitize_structure_refs: bool,
 }
 
 impl CopyContext {
@@ -88,6 +107,7 @@ impl CopyContext {
             selected_pages: BTreeSet::new(),
             options,
             prune_nested_resources: false,
+            sanitize_structure_refs: false,
         }
     }
 
@@ -237,7 +257,14 @@ impl CopyContext {
             if key.as_slice() == b"Parent" {
                 continue;
             }
-            if key.as_slice() == b"Annots" && !self.options.copy_annotations {
+            if key.as_slice() == b"Annots" {
+                if !self.options.copy_annotations {
+                    continue;
+                }
+                copied.set(
+                    key.clone(),
+                    self.copy_sanitized_value(source, target, value, depth + 1)?,
+                );
                 continue;
             }
             if key.as_slice() == b"Resources" {
@@ -362,12 +389,17 @@ impl CopyContext {
     ) -> Result<Object> {
         check_copy_depth(depth)?;
         match value {
-            Object::Reference(id) => Ok(Object::Reference(self.copy_object_at_depth(
-                source,
-                target,
-                *id,
-                depth + 1,
-            )?)),
+            Object::Reference(id) => {
+                if self.sanitize_structure_refs && self.is_document_structure_ref(source, *id) {
+                    return Ok(Object::Null);
+                }
+                Ok(Object::Reference(self.copy_object_at_depth(
+                    source,
+                    target,
+                    *id,
+                    depth + 1,
+                )?))
+            }
             Object::Array(items) => {
                 let mut copied = Vec::with_capacity(items.len());
                 for item in items {
@@ -398,12 +430,17 @@ impl CopyContext {
     ) -> Result<Object> {
         check_copy_depth(depth)?;
         match value {
-            Object::Reference(id) => Ok(Object::Reference(self.copy_object_at_depth(
-                source,
-                target,
-                id,
-                depth + 1,
-            )?)),
+            Object::Reference(id) => {
+                if self.sanitize_structure_refs && self.is_document_structure_ref(source, id) {
+                    return Ok(Object::Null);
+                }
+                Ok(Object::Reference(self.copy_object_at_depth(
+                    source,
+                    target,
+                    id,
+                    depth + 1,
+                )?))
+            }
             Object::Array(items) => {
                 let mut copied = Vec::with_capacity(items.len());
                 for item in items {
@@ -529,6 +566,95 @@ impl CopyContext {
         let result = self.copy_value(source, target, value, depth);
         self.prune_nested_resources = previous;
         result
+    }
+
+    /// Copy `value` with document-structure references sanitized: any
+    /// reference that resolves to the catalog, a page-tree node, the structure
+    /// tree, or a page that is not part of this copy is replaced with null
+    /// instead of being followed. Annotations (and document metadata) may
+    /// legally point back into the document — `/Dest` arrays, popup parents,
+    /// DocMDP `/Data` — and following such a reference from a page-subset copy
+    /// would pull unrelated pages, or the entire source document, into the
+    /// output.
+    fn copy_sanitized_value(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+        value: &Object,
+        depth: usize,
+    ) -> Result<Object> {
+        let previous = self.sanitize_structure_refs;
+        self.sanitize_structure_refs = true;
+        let result = self.copy_value(source, target, value, depth);
+        self.sanitize_structure_refs = previous;
+        result
+    }
+
+    /// True when `id` resolves to document structure that a sanitized copy
+    /// must not follow. Pages already visited by this copy (the annotation's
+    /// own page via `/P`, or a sibling page of the same output) stay
+    /// referenceable through the object map; a page copied later in the same
+    /// output is conservatively nulled — that only affects intra-output
+    /// `/Dest` links, never page content.
+    fn is_document_structure_ref(&self, source: &impl ObjectSource, id: ObjectId) -> bool {
+        if self.object_map.contains_key(&id) {
+            return false;
+        }
+        let Ok(object) = source.get_object_value(id) else {
+            return false;
+        };
+        let Ok(dict) = object.as_dict() else {
+            return false;
+        };
+        dict.has_type(b"Page")
+            || dict.has_type(b"Pages")
+            || dict.has_type(b"Catalog")
+            || dict.has_type(b"StructTreeRoot")
+    }
+
+    /// Copy the source's document-level metadata objects — the trailer `/Info`
+    /// dictionary and the catalog's XMP `/Metadata` stream — into `target`,
+    /// returning reference values for [`attach_document_metadata`] to hang on
+    /// the output once `finish_pages` has built its trailer and catalog.
+    ///
+    /// Metadata is best-effort: a damaged `/Info` or `/Metadata` object must
+    /// never fail the page operation itself, so copy errors leave the
+    /// corresponding slot empty (any objects copied before the error stay in
+    /// `target` unreferenced, which is harmless).
+    pub(crate) fn copy_document_metadata_objects(
+        &mut self,
+        source: &impl ObjectSource,
+        target: &mut Document,
+    ) -> CopiedDocumentMetadata {
+        let mut metadata = CopiedDocumentMetadata::default();
+        if let Some(info) = source.trailer_value(b"Info") {
+            metadata.info = self
+                .copy_sanitized_value(source, target, &info, 0)
+                .ok()
+                .and_then(|copied| match copied {
+                    reference @ Object::Reference(_) => Some(reference),
+                    // A direct trailer /Info dictionary is materialized as an
+                    // indirect object, which is what the spec requires of the
+                    // output trailer.
+                    Object::Dictionary(dictionary) => {
+                        Some(Object::Reference(target.add_object(dictionary)))
+                    }
+                    _ => None,
+                });
+        }
+        if let Some(Object::Reference(root_id)) = source.trailer_value(b"Root") {
+            let xmp = source
+                .get_object_value(root_id)
+                .ok()
+                .and_then(|root| root.as_dict().ok()?.get(b"Metadata").ok().cloned());
+            if let Some(value) = xmp {
+                metadata.xmp = self
+                    .copy_sanitized_value(source, target, &value, 0)
+                    .ok()
+                    .filter(|copied| matches!(copied, Object::Reference(_)));
+            }
+        }
+        metadata
     }
 
     fn resolve_dictionary<'a>(
@@ -736,22 +862,50 @@ fn is_form_xobject(dict: &Dictionary) -> bool {
     dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
 }
 
-pub(crate) fn copy_pages_with_options(
+/// Document-level metadata copied into a target by
+/// [`CopyContext::copy_document_metadata_objects`], as reference values ready
+/// to be attached to the output trailer and catalog.
+#[derive(Debug, Default)]
+pub(crate) struct CopiedDocumentMetadata {
+    pub(crate) info: Option<Object>,
+    pub(crate) xmp: Option<Object>,
+}
+
+/// Attach previously copied document metadata to `target`: `/Info` on the
+/// trailer and the XMP `/Metadata` stream on the catalog. Must run after
+/// `finish_pages` has set the trailer's `/Root`.
+pub(crate) fn attach_document_metadata(
+    target: &mut Document,
+    metadata: &CopiedDocumentMetadata,
+) -> Result<()> {
+    if let Some(info) = &metadata.info {
+        target.trailer.set("Info", info.clone());
+    }
+    if let Some(xmp) = &metadata.xmp {
+        let catalog_id = target
+            .trailer
+            .get(b"Root")
+            .and_then(Object::as_reference)
+            .map_err(PdfOpsError::Pdf)?;
+        let catalog = target
+            .get_object_mut(catalog_id)?
+            .as_dict_mut()
+            .map_err(|_| PdfOpsError::InvalidStructure("catalog is not a dictionary".into()))?;
+        catalog.set("Metadata", xmp.clone());
+    }
+    Ok(())
+}
+
+pub(crate) fn copy_pages_with_context(
     source: &impl ObjectSource,
     target: &mut Document,
     page_ids: &[ObjectId],
-    options: CopyOptions,
+    context: &mut CopyContext,
 ) -> Result<Vec<ObjectId>> {
     let mut copied_pages = Vec::with_capacity(page_ids.len());
-    // Annotation preservation is intentionally deferred because annotation
-    // dictionaries often contain page/document backreferences that need
-    // careful remapping.
-    let mut context = CopyContext::new(options);
-
     for page_id in page_ids {
         copied_pages.push(context.copy_page(source, target, *page_id)?);
     }
-
     Ok(copied_pages)
 }
 

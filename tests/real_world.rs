@@ -916,7 +916,7 @@ fn trf4_like_fixture_is_valid_and_counts_pages_in_flat_tree() {
 }
 
 #[test]
-fn pje_like_split_pages_keeps_drawn_filter_zoo_and_drops_annots() {
+fn pje_like_split_pages_keeps_drawn_filter_zoo_and_carries_annots() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("pje-like.pdf");
     build_pje_like(&input, PJE_PAGES);
@@ -956,18 +956,34 @@ fn pje_like_split_pages_keeps_drawn_filter_zoo_and_drops_annots() {
         jbig2_page.display()
     );
 
-    // page 18 (index 17) had a link annotation; pdq drops annotations on
-    // split by default (CopyOptions::copy_annotations = false)
+    // page 18 (index 17) has a self-referential GoTo link (PJe "Fls." style):
+    // annotations are preserved on split, and the destination's page
+    // reference must be remapped to the output's own page object.
     let annotated_page = out_dir.join(split_page_name(18, PJE_PAGES));
     let document = Document::load(&annotated_page).unwrap();
-    let page = document
-        .get_object(single_page_id(&document))
-        .unwrap()
-        .as_dict()
-        .unwrap();
-    assert!(
-        page.get(b"Annots").is_err(),
-        "split outputs should not carry annotations by default"
+    let page_id = single_page_id(&document);
+    let page = document.get_object(page_id).unwrap().as_dict().unwrap();
+    let annots = page
+        .get(b"Annots")
+        .expect("split outputs must carry the page's annotations")
+        .as_array()
+        .expect("Annots should be an array");
+    assert_eq!(annots.len(), 1, "the link annotation should survive");
+    let annot = resolve_dict(&document, &annots[0]);
+    assert_eq!(
+        annot.get(b"Subtype").and_then(Object::as_name).unwrap(),
+        b"Link"
+    );
+    let action = annot.get(b"A").unwrap().as_dict().unwrap();
+    let dest = match action.get(b"D").unwrap() {
+        Object::Reference(id) => document.get_object(*id).unwrap().as_array().unwrap(),
+        Object::Array(items) => items,
+        other => panic!("unexpected /D destination: {other:?}"),
+    };
+    assert_eq!(
+        dest[0],
+        Object::Reference(page_id),
+        "self-referential GoTo destination must be remapped to the output page"
     );
 
     let qpdf = QpdfValidator::detect();
