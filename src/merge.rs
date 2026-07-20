@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    copy::{copy_pages_with_options, CopyOptions},
+    copy::{
+        attach_document_metadata, copy_pages_with_context, CopiedDocumentMetadata, CopyContext,
+        CopyOptions,
+    },
     lazy::PdfSource,
     load::map_file,
     range::{PageRangeError, PageRangeGroup},
@@ -74,26 +77,30 @@ pub fn merge_with_options(
     'attempt: loop {
         let mut target = empty_document();
         let mut merged_pages = Vec::new();
+        // qpdf convention: the first input donates /Info and XMP.
+        let mut document_metadata = CopiedDocumentMetadata::default();
 
         for (index, input) in inputs.iter().enumerate() {
             let mmap = map_file(&input.path)?;
             let source =
                 open_merge_source(&mmap, &input.path, password, force_repair.contains(&index))?;
+            let mut context = CopyContext::new(CopyOptions {
+                prune_resources: !input.ranges.is_empty(),
+                ..CopyOptions::default()
+            });
             let copied = (|| {
                 let pages = source.page_ids()?;
                 let page_ids = resolve_merge_page_ids(&pages, input)?;
-                copy_pages_with_options(
-                    &source,
-                    &mut target,
-                    &page_ids,
-                    CopyOptions {
-                        prune_resources: !input.ranges.is_empty(),
-                        ..CopyOptions::default()
-                    },
-                )
+                copy_pages_with_context(&source, &mut target, &page_ids, &mut context)
             })();
             match copied {
-                Ok(pages) => merged_pages.extend(pages),
+                Ok(pages) => {
+                    if index == 0 {
+                        document_metadata =
+                            context.copy_document_metadata_objects(&source, &mut target);
+                    }
+                    merged_pages.extend(pages);
+                }
                 Err(err) if is_offset_damage(&err) && !source.repaired() => {
                     force_repair.insert(index);
                     continue 'attempt;
@@ -103,6 +110,7 @@ pub fn merge_with_options(
         }
 
         finish_pages(&mut target, &merged_pages)?;
+        attach_document_metadata(&mut target, &document_metadata)?;
         target.save(output)?;
         return Ok(());
     }
@@ -151,7 +159,7 @@ pub(crate) fn merge_whole_inputs_streaming(
                     if page_ids.is_empty() {
                         return Err(PdfOpsError::Range(PageRangeError::NoPages));
                     }
-                    append_whole_source(writer, &source, &page_ids)
+                    append_whole_source(writer, &source, &page_ids, index == 0)
                 })();
                 if let Err(err) = appended {
                     if !source.repaired() {
@@ -200,8 +208,9 @@ fn append_whole_source(
     writer: &mut StreamingPdfWriter,
     source: &PdfSource<'_>,
     page_ids: &[lopdf::ObjectId],
+    donates_metadata: bool,
 ) -> Result<()> {
-    let copied_pages = {
+    let (copied_pages, metadata) = {
         let mut context = StreamingCopyContext::new(
             writer,
             CopyOptions {
@@ -209,9 +218,15 @@ fn append_whole_source(
                 ..CopyOptions::default()
             },
         );
-        context.copy_pages(source, page_ids)?
+        let pages = context.copy_pages(source, page_ids)?;
+        // Same convention as the ranged merge: only the first input donates.
+        let metadata = donates_metadata.then(|| context.copy_document_metadata_objects(source));
+        (pages, metadata)
     };
     writer.extend_pages(copied_pages);
+    if let Some(metadata) = metadata {
+        writer.set_document_metadata(metadata);
+    }
     Ok(())
 }
 
@@ -256,7 +271,7 @@ fn copy_whole_input(input: &MergeInput, output: &Path, password: Option<&str>) -
         }
         if source.was_encrypted() || source.repaired() {
             return write_streaming_output(output, |writer| {
-                append_whole_source(writer, source, &page_ids)
+                append_whole_source(writer, source, &page_ids, true)
             });
         }
         fs::copy(&input.path, output)?;

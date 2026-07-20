@@ -175,6 +175,13 @@ impl ObjectSource for PdfSource<'_> {
             Self::Eager(document) => document.get_object_value(id),
         }
     }
+
+    fn trailer_value(&self, key: &[u8]) -> Option<Object> {
+        match self {
+            Self::Lazy(lazy) => lazy.reader.document.trailer.get(key).ok().cloned(),
+            Self::Eager(document) => document.trailer.get(key).ok().cloned(),
+        }
+    }
 }
 
 pub(crate) struct LazyPdf<'a> {

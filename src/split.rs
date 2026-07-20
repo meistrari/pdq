@@ -7,7 +7,10 @@ use lopdf::{dictionary, Document, Object};
 use rayon::prelude::*;
 
 use crate::{
-    copy::{copy_pages_with_options, resolve_page_ids, CopyOptions, ObjectSource},
+    copy::{
+        attach_document_metadata, copy_pages_with_context, resolve_page_ids, CopyContext,
+        CopyOptions, ObjectSource,
+    },
     load::{load_document, map_file},
     merge::merge_whole_inputs_streaming,
     range::{PageRangeError, PageRangeGroup},
@@ -321,8 +324,12 @@ fn run_split_outputs(
             prune_resources: output.prune_resources,
             ..CopyOptions::default()
         };
-        let copied_pages = copy_pages_with_options(source, &mut target, &output.page_ids, options)?;
+        let mut context = CopyContext::new(options);
+        let copied_pages =
+            copy_pages_with_context(source, &mut target, &output.page_ids, &mut context)?;
+        let metadata = context.copy_document_metadata_objects(source, &mut target);
         finish_pages(&mut target, &copied_pages)?;
+        attach_document_metadata(&mut target, &metadata)?;
         target.save(&output.path)?;
         Ok(())
     };
