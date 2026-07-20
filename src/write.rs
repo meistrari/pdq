@@ -146,12 +146,9 @@ impl<'a> StreamingCopyContext<'a> {
         }
     }
 
-    /// Copy the source's document-level metadata objects — the trailer `/Info`
-    /// dictionary and the catalog's XMP `/Metadata` stream — through the
-    /// streaming writer. Mirrors `CopyContext::copy_document_metadata_objects`:
-    /// best-effort (metadata must never fail the merge) and sanitized (a
-    /// malformed metadata object must not smuggle the source page tree into
-    /// the output).
+    /// Streaming mirror of `CopyContext::copy_document_metadata_objects`:
+    /// copy the trailer `/Info` and catalog XMP `/Metadata` through the
+    /// streaming writer, best-effort and sanitized.
     pub(crate) fn copy_document_metadata_objects(
         &mut self,
         source: &impl ObjectSource,
@@ -377,9 +374,7 @@ impl<'a> StreamingCopyContext<'a> {
                 let mut copied = Dictionary::new();
                 for (key, value) in dict.iter() {
                     // Same /Kids drop as CopyContext::copy_dictionary (see the
-                    // comment there): AcroForm field nodes reached from a
-                    // sanitized subtree must not drag sibling widgets from
-                    // other pages along.
+                    // comment there).
                     if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
                         continue;
                     }

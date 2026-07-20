@@ -77,8 +77,7 @@ pub fn merge_with_options(
     'attempt: loop {
         let mut target = empty_document();
         let mut merged_pages = Vec::new();
-        // Document metadata (/Info, XMP) follows qpdf's convention: the FIRST
-        // input is the primary document and donates its metadata.
+        // qpdf convention: the first input donates /Info and XMP.
         let mut document_metadata = CopiedDocumentMetadata::default();
 
         for (index, input) in inputs.iter().enumerate() {
@@ -220,8 +219,7 @@ fn append_whole_source(
             },
         );
         let pages = context.copy_pages(source, page_ids)?;
-        // Same convention as the ranged merge: only the first input donates
-        // its /Info and XMP metadata to the output.
+        // Same convention as the ranged merge: only the first input donates.
         let metadata = donates_metadata.then(|| context.copy_document_metadata_objects(source));
         (pages, metadata)
     };

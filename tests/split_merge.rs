@@ -1666,11 +1666,10 @@ fn assert_resource_keys(resources: &lopdf::Dictionary, key: &[u8], expected: &[&
     );
 }
 
-/// Two-page fixture rich in document-level metadata and annotations, shaped
-/// like a digitally signed Brazilian court document: trailer `/Info`, catalog
-/// XMP `/Metadata`, and page 1 carrying a URI link, a signature widget whose
-/// `/V` holds a `/ByteRange` + DocMDP `SigRef` (with a `/Data` backreference
-/// to the catalog), and a GoTo link whose destination points at page 2.
+/// Two-page fixture shaped like a digitally signed document: trailer `/Info`,
+/// catalog XMP `/Metadata`, and page 1 carrying a URI link, a signature
+/// widget (with a DocMDP `/Data` backreference to the catalog), and a GoTo
+/// link pointing at page 2.
 fn write_metadata_rich_pdf(path: &Path, author: &str) {
     let mut document = Document::with_version("1.7");
     let catalog_id = document.new_object_id();
@@ -1698,8 +1697,7 @@ fn write_metadata_rich_pdf(path: &Path, author: &str) {
     let sig_ref_id = document.add_object(dictionary! {
         "Type" => "SigRef",
         "TransformMethod" => "DocMDP",
-        // A DocMDP /Data backreference to the catalog: following it from a
-        // page-subset copy would pull the whole document.
+        // Following this from a page-subset copy would pull the whole document.
         "Data" => Object::Reference(catalog_id),
     });
     let sig_dict_id = document.add_object(dictionary! {
@@ -1854,10 +1852,8 @@ fn split_preserves_document_metadata_and_sanitized_annotations() {
         b"URI"
     );
 
-    // The signature widget keeps its /V signature dictionary (ByteRange and
-    // all), its /P is remapped to the output page, and the DocMDP /Data
-    // backreference to the catalog is sanitized to null instead of pulling
-    // the whole source document into the output.
+    // The signature widget keeps its /V dictionary, its /P is remapped to the
+    // output page, and the DocMDP /Data backreference is nulled.
     let sig_widget = resolve_to_dict(&document, &annots[1]);
     assert_eq!(sig_widget.get(b"P").unwrap(), &Object::Reference(pages[&1]));
     let sig_dict = resolve_to_dict(&document, sig_widget.get(b"V").unwrap());
@@ -1876,9 +1872,8 @@ fn split_preserves_document_metadata_and_sanitized_annotations() {
     );
     assert_eq!(sig_ref.get(b"Data").unwrap(), &Object::Null);
 
-    // The GoTo link's destination pointed at page 2, which is not part of
-    // this output: the page reference is nulled, and no second page object
-    // leaks into the output.
+    // The GoTo destination pointed at page 2, which is not in this output:
+    // the reference is nulled and no second page object leaks in.
     let goto_link = resolve_to_dict(&document, &annots[2]);
     let dest = goto_link.get(b"Dest").unwrap().as_array().unwrap();
     assert_eq!(dest[0], Object::Null);
@@ -1955,10 +1950,10 @@ fn merge_takes_document_metadata_from_first_input() {
 
 #[test]
 fn split_keeps_field_value_via_widget_parent_but_drops_field_kids() {
-    // A SPLIT signature field (value on the field node, widgets as /Kids on
-    // several pages): the widget's /Parent must stay followable — it carries
-    // the /V signature dictionary — but the field's /Kids would drag sibling
-    // widgets from other pages into the output, so it is dropped.
+    // A split signature field (value on the field node, widgets as /Kids on
+    // several pages): the widget's /Parent stays followable since it carries
+    // /V, but the field's /Kids is dropped so sibling widgets from other
+    // pages don't leak into the output.
     let temp = tempdir().unwrap();
     let input = temp.path().join("split-field.pdf");
 

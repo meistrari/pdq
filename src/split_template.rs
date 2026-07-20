@@ -147,10 +147,8 @@ impl SinglePageTemplate {
             self.inherited_attrs.clone(),
         );
         let new_page_id = context.copy_page(source, &mut scratch, page_id)?;
-        // Document metadata is copied per output rather than into the shared
-        // prefix: /Info and XMP are not reachable from any page, so they never
-        // land in the probed shared closure. Small objects; correctness over
-        // dedup.
+        // Metadata is copied per output: /Info and XMP are not reachable from
+        // any page, so they never land in the probed shared prefix.
         let metadata = context.copy_document_metadata_objects(source, &mut scratch);
         finish_pages(&mut scratch, &[new_page_id])?;
         attach_document_metadata(&mut scratch, &metadata)?;

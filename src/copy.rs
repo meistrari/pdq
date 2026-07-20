@@ -18,9 +18,7 @@ pub(crate) trait ObjectSource {
     fn get_object_value(&self, id: ObjectId) -> std::result::Result<Cow<'_, Object>, lopdf::Error>;
 
     /// The source trailer's value for `key` (`/Info`, `/Root`), when the
-    /// source exposes a trailer. Used to carry document-level metadata into
-    /// outputs; sources that cannot provide one (test doubles) keep the
-    /// default.
+    /// source exposes a trailer.
     fn trailer_value(&self, _key: &[u8]) -> Option<Object> {
         None
     }
@@ -49,12 +47,9 @@ pub struct CopyOptions {
 impl Default for CopyOptions {
     fn default() -> Self {
         Self {
-            // Annotations carry user-visible content — link targets, form
-            // widgets, and signature appearances (the gov.br stamp on Brazilian
-            // court documents) — so dropping them loses real page content.
-            // References back into document structure are sanitized during the
-            // copy (see `copy_sanitized_value`), which is what made copying
-            // them safe to enable.
+            // Annotations are user-visible content (links, form widgets,
+            // signature appearances); references back into document structure
+            // are sanitized during the copy (see `copy_sanitized_value`).
             copy_annotations: true,
             prune_resources: true,
         }
@@ -452,8 +447,7 @@ impl CopyContext {
                 let mut copied = lopdf::Dictionary::new();
                 for (key, value) in dict {
                     // Same /Kids drop as `copy_dictionary` (see the comment
-                    // there): field nodes reached from a sanitized subtree
-                    // must not drag sibling widgets from other pages along.
+                    // there).
                     if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
                         continue;
                     }
@@ -553,16 +547,11 @@ impl CopyContext {
         let mut copied = Dictionary::new();
         for (key, value) in dict.iter() {
             if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
-                // Inside a sanitized (annotation/metadata) subtree the only
-                // dictionaries carrying /Kids are AcroForm field nodes reached
-                // through a widget's /Parent — field nodes have no /Type, so
-                // the structure guard cannot catch them. Their /Kids lists the
-                // field's widgets across the WHOLE document; copying it would
-                // drag sibling widgets (and their appearance streams) from
-                // other pages into a subset output. Dropping /Kids keeps the
-                // field itself — crucially its /V signature value — while the
-                // output's own widget is already reachable via the page's
-                // /Annots.
+                // In a sanitized subtree, /Kids appears on AcroForm field
+                // nodes (reached via a widget's /Parent) and lists the field's
+                // widgets across the whole document; copying it would drag
+                // sibling widgets from other pages into the output. Dropping
+                // it keeps the field and its /V value.
                 continue;
             }
             copied.set(
@@ -587,14 +576,12 @@ impl CopyContext {
         result
     }
 
-    /// Copy `value` with document-structure references sanitized: any
-    /// reference that resolves to the catalog, a page-tree node, the structure
-    /// tree, or a page that is not part of this copy is replaced with null
-    /// instead of being followed. Annotations (and document metadata) may
-    /// legally point back into the document — `/Dest` arrays, popup parents,
-    /// DocMDP `/Data` — and following such a reference from a page-subset copy
-    /// would pull unrelated pages, or the entire source document, into the
-    /// output.
+    /// Copy `value` with document-structure references sanitized: a reference
+    /// resolving to the catalog, a page-tree node, the structure tree, or a
+    /// page outside this copy is replaced with null instead of followed.
+    /// Annotations may legally point back into the document (`/Dest`, DocMDP
+    /// `/Data`), and following such a reference would pull unrelated pages
+    /// into the output.
     fn copy_sanitized_value(
         &mut self,
         source: &impl ObjectSource,
@@ -614,15 +601,10 @@ impl CopyContext {
         references_document_structure(source, &self.object_map, id)
     }
 
-    /// Copy the source's document-level metadata objects — the trailer `/Info`
-    /// dictionary and the catalog's XMP `/Metadata` stream — into `target`,
-    /// returning reference values for [`attach_document_metadata`] to hang on
-    /// the output once `finish_pages` has built its trailer and catalog.
-    ///
-    /// Metadata is best-effort: a damaged `/Info` or `/Metadata` object must
-    /// never fail the page operation itself, so copy errors leave the
-    /// corresponding slot empty (any objects copied before the error stay in
-    /// `target` unreferenced, which is harmless).
+    /// Copy the trailer `/Info` dictionary and the catalog's XMP `/Metadata`
+    /// stream into `target`, returning references for
+    /// [`attach_document_metadata`]. Best-effort: damaged metadata never fails
+    /// the page operation; copy errors leave the slot empty.
     pub(crate) fn copy_document_metadata_objects(
         &mut self,
         source: &impl ObjectSource,
@@ -635,9 +617,7 @@ impl CopyContext {
                 .ok()
                 .and_then(|copied| match copied {
                     reference @ Object::Reference(_) => Some(reference),
-                    // A direct trailer /Info dictionary is materialized as an
-                    // indirect object, which is what the spec requires of the
-                    // output trailer.
+                    // The spec requires the trailer /Info to be indirect.
                     Object::Dictionary(dictionary) => {
                         Some(Object::Reference(target.add_object(dictionary)))
                     }
@@ -865,12 +845,10 @@ fn is_form_xobject(dict: &Dictionary) -> bool {
 }
 
 /// True when `id` resolves to document structure that a sanitized copy must
-/// not follow. Pages already visited by the copy (the annotation's own page
-/// via `/P`, or a sibling page of the same output) stay referenceable through
+/// not follow. Pages already visited by the copy stay referenceable through
 /// `object_map`; a page copied later in the same output is conservatively
-/// nulled — that only affects intra-output `/Dest` links, never page content.
-/// Shared by `CopyContext` and `StreamingCopyContext` so the structure-type
-/// list can never drift between the two.
+/// nulled, which only affects intra-output `/Dest` links, never page content.
+/// Shared by `CopyContext` and `StreamingCopyContext`.
 pub(crate) fn references_document_structure(
     source: &impl ObjectSource,
     object_map: &BTreeMap<ObjectId, ObjectId>,
@@ -891,18 +869,16 @@ pub(crate) fn references_document_structure(
         || dict.has_type(b"StructTreeRoot")
 }
 
-/// Document-level metadata copied into a target by
-/// [`CopyContext::copy_document_metadata_objects`], as reference values ready
-/// to be attached to the output trailer and catalog.
+/// References to copied `/Info` and XMP `/Metadata` objects, ready to be
+/// attached to the output trailer and catalog.
 #[derive(Debug, Default)]
 pub(crate) struct CopiedDocumentMetadata {
     pub(crate) info: Option<Object>,
     pub(crate) xmp: Option<Object>,
 }
 
-/// Attach previously copied document metadata to `target`: `/Info` on the
-/// trailer and the XMP `/Metadata` stream on the catalog. Must run after
-/// `finish_pages` has set the trailer's `/Root`.
+/// Attach copied metadata to `target`: `/Info` on the trailer, XMP
+/// `/Metadata` on the catalog. Must run after `finish_pages` has set `/Root`.
 pub(crate) fn attach_document_metadata(
     target: &mut Document,
     metadata: &CopiedDocumentMetadata,
