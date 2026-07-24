@@ -10,7 +10,7 @@ use std::{
 use lopdf::{dictionary, Dictionary, Object, ObjectId, StringFormat};
 
 use crate::{
-    copy::{CopyOptions, ObjectSource},
+    copy::{references_document_structure, CopiedDocumentMetadata, CopyOptions, ObjectSource},
     PdfOpsError, Result,
 };
 
@@ -24,6 +24,7 @@ pub(crate) struct StreamingPdfWriter {
     pages_id: ObjectId,
     catalog_id: ObjectId,
     pages: Vec<ObjectId>,
+    document_metadata: CopiedDocumentMetadata,
 }
 
 impl StreamingPdfWriter {
@@ -39,6 +40,7 @@ impl StreamingPdfWriter {
             pages_id: (0, 0),
             catalog_id: (0, 0),
             pages: Vec::new(),
+            document_metadata: CopiedDocumentMetadata::default(),
         };
         writer.pages_id = writer.new_object_id();
         writer.catalog_id = writer.new_object_id();
@@ -56,6 +58,12 @@ impl StreamingPdfWriter {
 
     pub(crate) fn extend_pages(&mut self, pages: impl IntoIterator<Item = ObjectId>) {
         self.pages.extend(pages);
+    }
+
+    /// Record document metadata (already written as objects) to be attached
+    /// at `finish`: `/Info` on the trailer, XMP `/Metadata` on the catalog.
+    pub(crate) fn set_document_metadata(&mut self, metadata: CopiedDocumentMetadata) {
+        self.document_metadata = metadata;
     }
 
     pub(crate) fn write_object(&mut self, id: ObjectId, object: &Object) -> Result<()> {
@@ -83,10 +91,13 @@ impl StreamingPdfWriter {
         };
         self.write_object(self.pages_id, &Object::Dictionary(pages))?;
 
-        let catalog = dictionary! {
+        let mut catalog = dictionary! {
             "Type" => "Catalog",
             "Pages" => self.pages_id,
         };
+        if let Some(xmp) = &self.document_metadata.xmp {
+            catalog.set("Metadata", xmp.clone());
+        }
         self.write_object(self.catalog_id, &Object::Dictionary(catalog))?;
 
         let xref_start = self.output.bytes_written();
@@ -100,10 +111,13 @@ impl StreamingPdfWriter {
             writeln!(self.output, "{offset:010} 00000 n ")?;
         }
         self.output.write_all(b"trailer\n")?;
-        let trailer = dictionary! {
+        let mut trailer = dictionary! {
             "Size" => (self.max_id + 1) as i64,
             "Root" => self.catalog_id,
         };
+        if let Some(info) = &self.document_metadata.info {
+            trailer.set("Info", info.clone());
+        }
         write_dictionary(&mut self.output, &trailer)?;
         write!(self.output, "\nstartxref\n{xref_start}\n%%EOF")?;
         self.output.flush()?;
@@ -117,6 +131,7 @@ pub(crate) struct StreamingCopyContext<'a> {
     inherited_attrs_cache: BTreeMap<ObjectId, Rc<InheritedPageAttrs>>,
     selected_pages: BTreeSet<ObjectId>,
     options: CopyOptions,
+    sanitize_structure_refs: bool,
 }
 
 impl<'a> StreamingCopyContext<'a> {
@@ -127,7 +142,66 @@ impl<'a> StreamingCopyContext<'a> {
             inherited_attrs_cache: BTreeMap::new(),
             selected_pages: BTreeSet::new(),
             options,
+            sanitize_structure_refs: false,
         }
+    }
+
+    /// Streaming mirror of `CopyContext::copy_document_metadata_objects`:
+    /// copy the trailer `/Info` and catalog XMP `/Metadata` through the
+    /// streaming writer, best-effort and sanitized.
+    pub(crate) fn copy_document_metadata_objects(
+        &mut self,
+        source: &impl ObjectSource,
+    ) -> CopiedDocumentMetadata {
+        let mut metadata = CopiedDocumentMetadata::default();
+        if let Some(info) = source.trailer_value(b"Info") {
+            metadata.info = self
+                .copy_sanitized_value(source, &info, 0)
+                .ok()
+                .and_then(|copied| match copied {
+                    reference @ Object::Reference(_) => Some(reference),
+                    Object::Dictionary(dictionary) => {
+                        let id = self.writer.new_object_id();
+                        self.writer
+                            .write_object(id, &Object::Dictionary(dictionary))
+                            .ok()?;
+                        Some(Object::Reference(id))
+                    }
+                    _ => None,
+                });
+        }
+        if let Some(Object::Reference(root_id)) = source.trailer_value(b"Root") {
+            let xmp = source
+                .get_object_value(root_id)
+                .ok()
+                .and_then(|root| root.as_dict().ok()?.get(b"Metadata").ok().cloned());
+            if let Some(value) = xmp {
+                metadata.xmp = self
+                    .copy_sanitized_value(source, &value, 0)
+                    .ok()
+                    .filter(|copied| matches!(copied, Object::Reference(_)));
+            }
+        }
+        metadata
+    }
+
+    /// See `CopyContext::copy_sanitized_value`.
+    fn copy_sanitized_value(
+        &mut self,
+        source: &impl ObjectSource,
+        value: &Object,
+        depth: usize,
+    ) -> Result<Object> {
+        let previous = self.sanitize_structure_refs;
+        self.sanitize_structure_refs = true;
+        let result = self.copy_value(source, value, depth);
+        self.sanitize_structure_refs = previous;
+        result
+    }
+
+    /// See [`references_document_structure`].
+    fn is_document_structure_ref(&self, source: &impl ObjectSource, id: ObjectId) -> bool {
+        references_document_structure(source, &self.object_map, id)
     }
 
     pub(crate) fn copy_pages(
@@ -245,7 +319,14 @@ impl<'a> StreamingCopyContext<'a> {
             if key.as_slice() == b"Parent" {
                 continue;
             }
-            if key.as_slice() == b"Annots" && !self.options.copy_annotations {
+            if key.as_slice() == b"Annots" {
+                if !self.options.copy_annotations {
+                    continue;
+                }
+                copied.set(
+                    key.clone(),
+                    self.copy_sanitized_value(source, value, depth + 1)?,
+                );
                 continue;
             }
             copied.set(key.clone(), self.copy_value(source, value, depth + 1)?);
@@ -272,11 +353,16 @@ impl<'a> StreamingCopyContext<'a> {
     ) -> Result<Object> {
         check_copy_depth(depth)?;
         match value {
-            Object::Reference(id) => Ok(Object::Reference(self.copy_object_at_depth(
-                source,
-                *id,
-                depth + 1,
-            )?)),
+            Object::Reference(id) => {
+                if self.sanitize_structure_refs && self.is_document_structure_ref(source, *id) {
+                    return Ok(Object::Null);
+                }
+                Ok(Object::Reference(self.copy_object_at_depth(
+                    source,
+                    *id,
+                    depth + 1,
+                )?))
+            }
             Object::Array(items) => {
                 let mut copied = Vec::with_capacity(items.len());
                 for item in items {
@@ -287,6 +373,11 @@ impl<'a> StreamingCopyContext<'a> {
             Object::Dictionary(dict) => {
                 let mut copied = Dictionary::new();
                 for (key, value) in dict.iter() {
+                    // Same /Kids drop as CopyContext::copy_dictionary (see the
+                    // comment there).
+                    if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
+                        continue;
+                    }
                     copied.set(key.clone(), self.copy_value(source, value, depth + 1)?);
                 }
                 Ok(Object::Dictionary(copied))
@@ -308,11 +399,16 @@ impl<'a> StreamingCopyContext<'a> {
     ) -> Result<Object> {
         check_copy_depth(depth)?;
         match value {
-            Object::Reference(id) => Ok(Object::Reference(self.copy_object_at_depth(
-                source,
-                id,
-                depth + 1,
-            )?)),
+            Object::Reference(id) => {
+                if self.sanitize_structure_refs && self.is_document_structure_ref(source, id) {
+                    return Ok(Object::Null);
+                }
+                Ok(Object::Reference(self.copy_object_at_depth(
+                    source,
+                    id,
+                    depth + 1,
+                )?))
+            }
             Object::Array(items) => {
                 let mut copied = Vec::with_capacity(items.len());
                 for item in items {
@@ -323,6 +419,9 @@ impl<'a> StreamingCopyContext<'a> {
             Object::Dictionary(dict) => {
                 let mut copied = Dictionary::new();
                 for (key, value) in dict {
+                    if self.sanitize_structure_refs && key.as_slice() == b"Kids" {
+                        continue;
+                    }
                     copied.set(key, self.copy_owned_value(source, value, depth + 1)?);
                 }
                 Ok(Object::Dictionary(copied))

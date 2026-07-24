@@ -114,6 +114,15 @@ Outputs carry only the resources their pages actually use: unused fonts,
 images, and form XObjects shared across the source document are pruned so a
 3-page extract of a 200 MB file is small, not 200 MB.
 
+Outputs also keep page annotations (links, form widgets, signature
+appearances), the trailer `/Info` dictionary, and the catalog's XMP
+`/Metadata` stream. Annotation references into document structure, such as a
+`/Dest` pointing at a page outside the output, are nulled so they never pull
+unrelated pages into a subset. An embedded digital signature survives as
+data but cannot stay valid on a subset: its `/ByteRange` covers the original
+file's bytes. `merge` follows the same rules, taking `/Info` and XMP from
+its first input.
+
 A single `--out 1-z` output is a whole-document rewrite (normalize structure,
 drop unreferenced objects, decrypt): pdq streams objects from the
 memory-mapped input straight to disk, so peak memory stays a few tens of MB

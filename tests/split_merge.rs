@@ -1665,3 +1665,415 @@ fn assert_resource_keys(resources: &lopdf::Dictionary, key: &[u8], expected: &[&
         path.display()
     );
 }
+
+/// Two-page fixture shaped like a digitally signed document: trailer `/Info`,
+/// catalog XMP `/Metadata`, and page 1 carrying a URI link, a signature
+/// widget (with a DocMDP `/Data` backreference to the catalog), and a GoTo
+/// link pointing at page 2.
+fn write_metadata_rich_pdf(path: &Path, author: &str) {
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let page1_id = document.new_object_id();
+    let page2_id = document.new_object_id();
+
+    let info_id = document.add_object(dictionary! {
+        "Author" => Object::string_literal(author),
+        "Producer" => Object::string_literal("Microsoft Word"),
+        "CreationDate" => Object::string_literal("D:20250219161350-03'00'"),
+    });
+    let xmp_id = document.add_object(Object::Stream(Stream::new(
+        dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+        b"<?xpacket begin=\"\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/><?xpacket end=\"w\"?>"
+            .to_vec(),
+    )));
+
+    let uri_link_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+        "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("mailto:someone@example.com") },
+    });
+    let sig_ref_id = document.add_object(dictionary! {
+        "Type" => "SigRef",
+        "TransformMethod" => "DocMDP",
+        // Following this from a page-subset copy would pull the whole document.
+        "Data" => Object::Reference(catalog_id),
+    });
+    let sig_dict_id = document.add_object(dictionary! {
+        "Type" => "Sig",
+        "Filter" => "Adobe.PPKLite",
+        "SubFilter" => "adbe.pkcs7.detached",
+        "ByteRange" => Object::Array(vec![0.into(), 100.into(), 200.into(), 50.into()]),
+        "Contents" => Object::String(vec![0u8; 16], lopdf::StringFormat::Hexadecimal),
+        "Reference" => Object::Array(vec![Object::Reference(sig_ref_id)]),
+    });
+    let sig_widget_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Sig",
+        "Rect" => Object::Array(vec![88.into(), 178.into(), 253.into(), 223.into()]),
+        "F" => 132,
+        "P" => Object::Reference(page1_id),
+        "V" => Object::Reference(sig_dict_id),
+    });
+    let goto_page2_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => Object::Array(vec![0.into(), 30.into(), 50.into(), 50.into()]),
+        "Dest" => Object::Array(vec![Object::Reference(page2_id), "Fit".into()]),
+    });
+
+    for (page_id, annots) in [
+        (
+            page1_id,
+            vec![
+                Object::Reference(uri_link_id),
+                Object::Reference(sig_widget_id),
+                Object::Reference(goto_page2_id),
+            ],
+        ),
+        (page2_id, vec![]),
+    ] {
+        let content_id = document.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"q Q".to_vec(),
+        )));
+        let mut page = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+            "Resources" => dictionary! {},
+            "Contents" => content_id,
+        };
+        if !annots.is_empty() {
+            page.set("Annots", Object::Array(annots));
+        }
+        document.objects.insert(page_id, page.into());
+    }
+
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![
+                Object::Reference(page1_id),
+                Object::Reference(page2_id),
+            ]),
+            "Count" => 2,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        catalog_id,
+        dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+            "Metadata" => Object::Reference(xmp_id),
+        }
+        .into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document.trailer.set("Info", Object::Reference(info_id));
+    document
+        .save(path)
+        .unwrap_or_else(|err| panic!("failed to save metadata-rich fixture: {err}"));
+}
+
+fn resolve_to_dict<'a>(document: &'a Document, value: &Object) -> &'a Dictionary {
+    match value {
+        Object::Reference(id) => document.get_object(*id).unwrap().as_dict().unwrap(),
+        _ => panic!("expected an indirect reference, got {value:?}"),
+    }
+}
+
+fn author_of(document: &Document) -> String {
+    let info = document
+        .trailer
+        .get(b"Info")
+        .expect("output must carry /Info");
+    let author = resolve_to_dict(document, info).get(b"Author").unwrap();
+    String::from_utf8_lossy(author.as_str().unwrap()).into_owned()
+}
+
+fn xmp_content_of(document: &Document) -> Vec<u8> {
+    let catalog = document.catalog().unwrap();
+    let metadata = catalog
+        .get(b"Metadata")
+        .expect("output catalog must carry /Metadata");
+    let Object::Reference(id) = metadata else {
+        panic!("catalog /Metadata should be an indirect reference");
+    };
+    let Object::Stream(stream) = document.get_object(*id).unwrap() else {
+        panic!("catalog /Metadata should resolve to a stream");
+    };
+    stream.content.clone()
+}
+
+#[test]
+fn split_preserves_document_metadata_and_sanitized_annotations() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("metadata-rich.pdf");
+    write_metadata_rich_pdf(&input, "Marykeller Mello");
+    let output = temp.path().join("page-1.pdf");
+
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    let document = Document::load(&output).unwrap();
+    let pages = document.get_pages();
+    assert_eq!(pages.len(), 1);
+
+    // Document metadata survives the split.
+    assert_eq!(author_of(&document), "Marykeller Mello");
+    assert!(xmp_content_of(&document).starts_with(b"<?xpacket"));
+
+    // All three annotations survive.
+    let page = document.get_dictionary(pages[&1]).unwrap();
+    let annots = page.get(b"Annots").unwrap().as_array().unwrap();
+    assert_eq!(annots.len(), 3);
+
+    let uri_link = resolve_to_dict(&document, &annots[0]);
+    assert_eq!(
+        uri_link
+            .get(b"A")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"S")
+            .and_then(Object::as_name)
+            .unwrap(),
+        b"URI"
+    );
+
+    // The signature widget keeps its /V dictionary, its /P is remapped to the
+    // output page, and the DocMDP /Data backreference is nulled.
+    let sig_widget = resolve_to_dict(&document, &annots[1]);
+    assert_eq!(sig_widget.get(b"P").unwrap(), &Object::Reference(pages[&1]));
+    let sig_dict = resolve_to_dict(&document, sig_widget.get(b"V").unwrap());
+    assert_eq!(
+        sig_dict
+            .get(b"ByteRange")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    let sig_ref = resolve_to_dict(
+        &document,
+        &sig_dict.get(b"Reference").unwrap().as_array().unwrap()[0],
+    );
+    assert_eq!(sig_ref.get(b"Data").unwrap(), &Object::Null);
+
+    // The GoTo destination pointed at page 2, which is not in this output:
+    // the reference is nulled and no second page object leaks in.
+    let goto_link = resolve_to_dict(&document, &annots[2]);
+    let dest = goto_link.get(b"Dest").unwrap().as_array().unwrap();
+    assert_eq!(dest[0], Object::Null);
+    let page_objects = document
+        .objects
+        .values()
+        .filter(|object| {
+            object
+                .as_dict()
+                .is_ok_and(|dictionary| dictionary.has_type(b"Page"))
+        })
+        .count();
+    assert_eq!(page_objects, 1, "page 2 must not leak into the output");
+
+    QpdfValidator::detect().validate(&output, 1);
+}
+
+#[test]
+fn split_pages_outputs_carry_document_metadata() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("metadata-rich.pdf");
+    write_metadata_rich_pdf(&input, "Marykeller Mello");
+    let pattern = temp.path().join("page-%d.pdf");
+
+    split_pages(&input, pattern.to_str().unwrap()).unwrap();
+
+    for page in 1..=2 {
+        let document = Document::load(temp.path().join(format!("page-{page}.pdf"))).unwrap();
+        assert_eq!(author_of(&document), "Marykeller Mello");
+        assert!(xmp_content_of(&document).starts_with(b"<?xpacket"));
+    }
+}
+
+#[test]
+fn merge_takes_document_metadata_from_first_input() {
+    let temp = tempdir().unwrap();
+    let first = temp.path().join("first.pdf");
+    let second = temp.path().join("second.pdf");
+    write_metadata_rich_pdf(&first, "First Author");
+    write_metadata_rich_pdf(&second, "Second Author");
+
+    // Whole-input merge takes the streaming path.
+    let streamed = temp.path().join("streamed.pdf");
+    merge(
+        &[MergeInput::all(&first), MergeInput::all(&second)],
+        &streamed,
+    )
+    .unwrap();
+    let document = Document::load(&streamed).unwrap();
+    assert_eq!(document.get_pages().len(), 4);
+    assert_eq!(author_of(&document), "First Author");
+    assert!(xmp_content_of(&document).starts_with(b"<?xpacket"));
+    QpdfValidator::detect().validate(&streamed, 4);
+
+    // A ranged merge takes the eager per-input path; same convention.
+    let ranged = temp.path().join("ranged.pdf");
+    merge(
+        &[
+            MergeInput {
+                path: first.clone(),
+                ranges: vec![PageRangeGroup::parse("1").unwrap()],
+            },
+            MergeInput::all(&second),
+        ],
+        &ranged,
+    )
+    .unwrap();
+    let document = Document::load(&ranged).unwrap();
+    assert_eq!(document.get_pages().len(), 3);
+    assert_eq!(author_of(&document), "First Author");
+    assert!(xmp_content_of(&document).starts_with(b"<?xpacket"));
+    QpdfValidator::detect().validate(&ranged, 3);
+}
+
+#[test]
+fn split_keeps_field_value_via_widget_parent_but_drops_field_kids() {
+    // A split signature field (value on the field node, widgets as /Kids on
+    // several pages): the widget's /Parent stays followable since it carries
+    // /V, but the field's /Kids is dropped so sibling widgets from other
+    // pages don't leak into the output.
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("split-field.pdf");
+
+    let mut document = Document::with_version("1.7");
+    let catalog_id = document.new_object_id();
+    let pages_id = document.new_object_id();
+    let page1_id = document.new_object_id();
+    let page2_id = document.new_object_id();
+    let field_id = document.new_object_id();
+
+    let sig_dict_id = document.add_object(dictionary! {
+        "Type" => "Sig",
+        "ByteRange" => Object::Array(vec![0.into(), 100.into(), 200.into(), 50.into()]),
+    });
+    let widget1_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+        "P" => Object::Reference(page1_id),
+        "Parent" => Object::Reference(field_id),
+    });
+    let widget2_id = document.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "Rect" => Object::Array(vec![0.into(), 0.into(), 50.into(), 20.into()]),
+        "P" => Object::Reference(page2_id),
+        "Parent" => Object::Reference(field_id),
+    });
+    document.objects.insert(
+        field_id,
+        dictionary! {
+            "FT" => "Sig",
+            "T" => Object::string_literal("assinatura"),
+            "V" => Object::Reference(sig_dict_id),
+            "Kids" => Object::Array(vec![
+                Object::Reference(widget1_id),
+                Object::Reference(widget2_id),
+            ]),
+        }
+        .into(),
+    );
+
+    for (page_id, widget_id) in [(page1_id, widget1_id), (page2_id, widget2_id)] {
+        let content_id = document.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"q Q".to_vec(),
+        )));
+        document.objects.insert(
+            page_id,
+            dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => Object::Array(vec![0.into(), 0.into(), 100.into(), 100.into()]),
+                "Resources" => dictionary! {},
+                "Contents" => content_id,
+                "Annots" => Object::Array(vec![Object::Reference(widget_id)]),
+            }
+            .into(),
+        );
+    }
+    document.objects.insert(
+        pages_id,
+        dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![
+                Object::Reference(page1_id),
+                Object::Reference(page2_id),
+            ]),
+            "Count" => 2,
+        }
+        .into(),
+    );
+    document.objects.insert(
+        catalog_id,
+        dictionary! { "Type" => "Catalog", "Pages" => pages_id }.into(),
+    );
+    document.trailer.set("Root", catalog_id);
+    document.save(&input).unwrap();
+
+    let output = temp.path().join("page-1.pdf");
+    split(
+        &input,
+        &[SplitOutput {
+            range: PageRangeGroup::parse("1").unwrap(),
+            path: output.clone(),
+        }],
+    )
+    .unwrap();
+
+    let document = Document::load(&output).unwrap();
+    let pages = document.get_pages();
+    assert_eq!(pages.len(), 1);
+    let page = document.get_dictionary(pages[&1]).unwrap();
+    let annots = page.get(b"Annots").unwrap().as_array().unwrap();
+    let widget = resolve_to_dict(&document, &annots[0]);
+
+    // /Parent → field survives with the signature value…
+    let field = resolve_to_dict(&document, widget.get(b"Parent").unwrap());
+    let signature = resolve_to_dict(&document, field.get(b"V").unwrap());
+    assert_eq!(
+        signature
+            .get(b"ByteRange")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    // …but /Kids is dropped, and with it page 2's sibling widget.
+    assert!(field.get(b"Kids").is_err(), "field /Kids must be dropped");
+    let widget_count = document
+        .objects
+        .values()
+        .filter(|object| {
+            object.as_dict().is_ok_and(|dictionary| {
+                dictionary.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Widget")
+            })
+        })
+        .count();
+    assert_eq!(widget_count, 1, "sibling widgets must not leak");
+
+    QpdfValidator::detect().validate(&output, 1);
+}

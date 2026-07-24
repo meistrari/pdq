@@ -28,7 +28,7 @@ use std::{
 use lopdf::{dictionary, Object, ObjectId};
 
 use crate::{
-    copy::{CopyContext, CopyOptions, InheritedAttrsCache, ObjectSource},
+    copy::{attach_document_metadata, CopyContext, CopyOptions, InheritedAttrsCache, ObjectSource},
     split::{empty_document, finish_pages},
     write::{write_dictionary, write_object},
     PdfOpsError, Result,
@@ -147,12 +147,17 @@ impl SinglePageTemplate {
             self.inherited_attrs.clone(),
         );
         let new_page_id = context.copy_page(source, &mut scratch, page_id)?;
+        // Metadata is copied per output: /Info and XMP are not reachable from
+        // any page, so they never land in the probed shared prefix.
+        let metadata = context.copy_document_metadata_objects(source, &mut scratch);
         finish_pages(&mut scratch, &[new_page_id])?;
+        attach_document_metadata(&mut scratch, &metadata)?;
         let root = scratch
             .trailer
             .get(b"Root")
             .map_err(PdfOpsError::Pdf)?
             .clone();
+        let info = scratch.trailer.get(b"Info").ok().cloned();
 
         buffer.clear();
         buffer.extend_from_slice(&self.prefix);
@@ -181,10 +186,13 @@ impl SinglePageTemplate {
         buffer.extend_from_slice(&self.xref_prefix);
         buffer.extend_from_slice(&xref_tail);
         buffer.extend_from_slice(b"trailer\n");
-        let trailer = dictionary! {
+        let mut trailer = dictionary! {
             "Size" => (max_id + 1) as i64,
             "Root" => root,
         };
+        if let Some(info) = info {
+            trailer.set("Info", info);
+        }
         write_dictionary(buffer, &trailer)?;
         write!(buffer, "\nstartxref\n{xref_start}\n%%EOF")?;
 
