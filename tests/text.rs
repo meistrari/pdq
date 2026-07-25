@@ -21,6 +21,16 @@ fn extract_all(name: &str) -> Vec<pdq::PageText> {
     extract_text(&fixture(name), &ExtractTextOptions::default()).unwrap()
 }
 
+/// A PDF from the checked-out corpus, or `None` when no corpus is present —
+/// the same silent skip `tests/corpus.rs` uses so CI without one is
+/// unaffected.
+fn corpus_file(relative: &str) -> Option<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("corpus")
+        .join(relative);
+    path.exists().then_some(path)
+}
+
 /// Whether these tests are running against an unpacked crates.io release
 /// rather than a checkout of the repository.
 ///
@@ -282,6 +292,121 @@ fn algorithmic_glyph_names_resolve_without_tounicode() {
         !page.degraded,
         "every glyph name is recoverable, so the page must not be degraded"
     );
+}
+
+/// hayro-syntax's object lexer has no recursion cap, so deeply nested
+/// dictionaries used to overflow the stack and abort the process (exit 134,
+/// no unwinding). `corpus/qpdf-qtest/0413-issue-202.pdf` nests its *trailer*
+/// 68,467 levels deep, which killed `Pdf::new` itself — yet the file is
+/// perfectly readable given enough stack, so the fix has to extract it, not
+/// reject it.
+#[test]
+fn deeply_nested_trailer_extracts_instead_of_aborting() {
+    let Some(path) = corpus_file("qpdf-qtest/0413-issue-202.pdf") else {
+        eprintln!("skipping: corpus not present");
+        return;
+    };
+
+    let output = pdq()
+        .arg("text")
+        .arg(&path)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let pages = value.as_array().unwrap();
+    assert_eq!(pages.len(), 10);
+    let texts: Vec<&str> = pages[0]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["text"].as_str().unwrap())
+        .collect();
+    assert!(
+        texts.contains(&"Sample PDF Document"),
+        "the file extracts real text once the stack is big enough: {texts:?}"
+    );
+}
+
+/// A one-page PDF whose trailer dictionary nests `depth` levels deep, written
+/// to `path`. Built rather than committed because the interesting depths run
+/// to megabytes of angle brackets.
+fn write_trailer_nesting_bomb(path: &std::path::Path, depth: usize) {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (n, body) in [
+        &b"<</Type/Catalog/Pages 2 0 R>>"[..],
+        &b"<</Type/Pages/Kids[3 0 R]/Count 1>>"[..],
+        &b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>"[..],
+    ]
+    .iter()
+    .enumerate()
+    {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", n + 1).as_bytes());
+        pdf.extend_from_slice(body);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref_at = pdf.len();
+    pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(b"trailer\n");
+    pdf.extend(std::iter::repeat_n(b'<', 2 * depth));
+    pdf.extend_from_slice(b"/Size 4/Root 1 0 R");
+    pdf.extend(std::iter::repeat_n(b'>', 2 * depth));
+    pdf.extend_from_slice(format!("\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+    std::fs::write(path, &pdf).unwrap();
+}
+
+/// Nesting past what the hayro thread's stack can survive must be a clean
+/// error, not a signal.
+#[test]
+fn absurd_uncompressed_nesting_is_a_clean_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("nested.pdf");
+    write_trailer_nesting_bomb(&path, 300_000);
+
+    // `.code(1)` rather than `.failure()`: a process killed by SIGABRT has no
+    // exit code at all, and that is exactly the outcome being ruled out.
+    pdq()
+        .arg("text")
+        .arg(&path)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("nesting depth"));
+}
+
+/// The other side of the cap: nesting *below* it must actually survive, in
+/// whatever profile the suite is running under.
+///
+/// This is the regression test for a cap sized against optimized frames only.
+/// An unoptimized hayro spends ~5x the stack per level, so a cap derived from
+/// the release figure sat above what a debug build could survive and this file
+/// — accepted by the guard — aborted the process with SIGABRT. 130,000 is just
+/// past the ~110,000 where a debug build used to die; it costs the hayro
+/// thread ~330 MiB of committed stack under `cargo test` and ~64 MiB under
+/// `cargo test --release`.
+#[test]
+fn nesting_below_the_cap_survives_in_every_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("nested.pdf");
+    write_trailer_nesting_bomb(&path, 130_000);
+
+    let output = pdq()
+        .arg("text")
+        .arg(&path)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value.as_array().unwrap().len(), 1);
 }
 
 #[test]

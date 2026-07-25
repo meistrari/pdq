@@ -517,6 +517,12 @@ not a general PDF rewriting toolkit:
   destinations — are not restructured when splitting; page content and
   resources are what is preserved.
 - `render` cannot take a password (see [`pdq render`](#pdq-render--rasterize-to-png)).
+- `text` and `render` can be killed by a crafted nesting bomb: hayro's object
+  lexer has no recursion cap, and a stack overflow aborts the process. pdq
+  gives it a large stack and rejects absurd `<<` nesting it can see, but
+  nesting hidden inside a compressed stream still aborts — `src/hayro_stack.rs`
+  documents the bounds. pdq's own parser does cap recursion, so `split`,
+  `merge`, `page-count` and `dimensions` are unaffected.
 
 ## Development
 

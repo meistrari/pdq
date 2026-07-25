@@ -17,6 +17,7 @@ use hayro::hayro_interpret::{
 use kurbo::{Affine, BezPath, Point, Rect, Vec2};
 
 use crate::{
+    hayro_stack::{guard_nesting_depth, with_deep_stack},
     range::{dedupe_preserving_order, PageRangeGroup},
     PdfOpsError, Result,
 };
@@ -71,7 +72,12 @@ pub struct PageText {
 }
 
 pub fn extract_text(input: &Path, options: &ExtractTextOptions) -> Result<Vec<PageText>> {
+    with_deep_stack(|| extract_text_inner(input, options))
+}
+
+fn extract_text_inner(input: &Path, options: &ExtractTextOptions) -> Result<Vec<PageText>> {
     let data = fs::read(input)?;
+    guard_nesting_depth(&data, input)?;
     let pdf = load_pdf(data, options.password.as_deref(), input)?;
     let pages = pdf.pages();
 
