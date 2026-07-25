@@ -225,7 +225,7 @@ with a real user password cannot be rendered.
 ### `pdq text` — positioned text runs as JSON
 
 ```sh
-pdq text [--pages RANGES] [--password PW] input.pdf
+pdq text [--pages RANGES] [--password PW] [--no-annotations] input.pdf
 ```
 
 Extracts each selected page's text runs with their positions, using the same
@@ -263,12 +263,20 @@ hayro interpreter `render` uses, and prints a JSON array to stdout:
   0.1–0.6 em past a glyph's advance becomes `' '`, anything wider starts a
   new run.
 - A scanned/image-only page succeeds with `"runs": []`.
-- **`degraded: true`** flags pages where at least one visible glyph could
-  not be mapped to Unicode (it is emitted as U+FFFD instead of being
-  silently dropped) — the caller can distinguish "extraction failed" from
-  "no text on page", which pdf.js's `getTextContent` cannot signal.
+- **`degraded: true`** flags pages whose text is known to be incomplete:
+  at least one visible glyph could not be mapped to Unicode (it is emitted as
+  U+FFFD instead of being silently dropped), or the page's annotation layer
+  was skipped (see below). The caller can distinguish "extraction failed"
+  from "no text on page", which pdf.js's `getTextContent` cannot signal.
 - Invisible text (render mode 3, e.g. OCR layers under scanned pages) is
-  extracted; annotation appearance streams are not.
+  extracted.
+- Annotation and form-field appearance streams are extracted too, like
+  `pdftotext` and `mutool draw -F txt` do: a filled text widget's value comes
+  back as a run positioned at the widget. `--no-annotations` restricts the
+  output to the page content stream. Hidden annotations are always excluded,
+  an annotation with no `/AP` yields no text, and a page carrying an
+  implausible number of them has the layer skipped and is marked `degraded`
+  — `src/text.rs` documents the exact bounds.
 
 `text` is behind the `text` cargo feature (on by default) and, unlike
 `render`, takes `--password` for encrypted inputs.
@@ -492,7 +500,8 @@ Encrypted inputs go through the `*_with_password` variants
 structs (`SplitPagesOptions`, `MergeOptions`). Rendering is
 `pdq::render_pages` with `RenderOptions { dpi, pages }`, behind the `render`
 feature. Text extraction is `pdq::extract_text` with `ExtractTextOptions
-{ pages, password }`, returning `Vec<PageText>`, behind the `text` feature.
+{ pages, password, annotations }`, returning `Vec<PageText>`, behind the
+`text` feature.
 
 ### Feature flags and MSRV
 

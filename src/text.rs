@@ -10,7 +10,11 @@ use std::{
 use hayro::hayro_interpret::{
     font::Glyph,
     hayro_cmap::BfString,
-    hayro_syntax::{page::Page, LoadPdfError, Pdf},
+    hayro_syntax::{
+        object::{dict::keys::ANNOTS, Array},
+        page::Page,
+        LoadPdfError, Pdf,
+    },
     interpret_page, BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache,
     InterpreterSettings, InterpreterWarning, Paint, PathDrawMode, SoftMask, TransformExt,
 };
@@ -27,6 +31,25 @@ use crate::{
 const ASCENT_FACTOR: f64 = 0.8;
 /// hayro glyph transforms take font units (thousandths of an em) as input.
 const FONT_UNITS_PER_EM: f64 = 1000.0;
+/// Annotations on one page past which their appearance streams are skipped.
+///
+/// hayro-syntax rebuilds an object stream's entire offset table on *every*
+/// object it resolves out of it (`ObjectStream::new` in `xref.rs`), so
+/// resolving a page's annotations costs annotations x objects-in-that-stream.
+/// `corpus/pdfjs/bug1978317.pdf` puts 32,768 `/Link` annotations in a 13 MB
+/// object stream and takes 25 s to yield no text at all, against 93 ms with
+/// annotations off.
+///
+/// The busiest page in the 1,856-file corpus carries 171 annotations, so this
+/// is a 24x margin over anything real; pages past it are link or popup spam,
+/// which by construction has no `/AP` and so contributes no text. Skipping
+/// marks the page [`PageText::degraded`] rather than dropping the fact
+/// silently. It bounds the blowup, it does not remove it — the real fix is a
+/// per-stream offset cache upstream (LaurenzV/hayro), and until that ships
+/// `render` keeps the same pathology, where dropping annotations would change
+/// pixels.
+const MAX_ANNOTATIONS_PER_PAGE: usize = 4_096;
+
 /// Gap past a glyph's advance (in em) that reads as a word space rather than
 /// kerning or tracking, synthesized as ' ' for PDFs that encode word gaps as
 /// TJ offsets instead of space glyphs (LaTeX). Poppler's `minWordBreakSpace`
@@ -37,10 +60,30 @@ const WORD_GAP_MIN: f64 = 0.1;
 /// `SPACE_IN_FLOW_MAX_FACTOR`); anything wider starts a new run.
 const WORD_GAP_MAX: f64 = 0.6;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExtractTextOptions {
     pub pages: Option<PageRangeGroup>,
     pub password: Option<String>,
+    /// Include the text of annotation and form-field appearance streams —
+    /// a filled text widget's value, a FreeText note, a stamp — alongside the
+    /// page content stream. Defaults to `true`, matching `pdftotext`,
+    /// `mutool draw -F txt` and pdf-oxide. Annotations flagged Hidden
+    /// (`/F` bit 2) are excluded either way.
+    pub annotations: bool,
+}
+
+impl Default for ExtractTextOptions {
+    fn default() -> Self {
+        Self {
+            pages: None,
+            password: None,
+            // The JSON is the whole output: there is no second layer for a
+            // caller to consult, so dropping appearance streams silently
+            // loses filled-in form values. `CopyOptions::copy_annotations`
+            // defaults to true for the same reason.
+            annotations: true,
+        }
+    }
 }
 
 /// A horizontal (or uniformly-oriented) sequence of glyphs positioned on the
@@ -64,9 +107,11 @@ pub struct PageText {
     pub page: usize,
     pub width: f32,
     pub height: f32,
-    /// True when at least one glyph on the page could not be mapped to
-    /// Unicode (emitted as U+FFFD) or the interpreter reported a font it
-    /// could not decode. Distinguishes "extraction failed" from "no text".
+    /// True when the page's text is known to be incomplete or unreliable: a
+    /// glyph could not be mapped to Unicode (emitted as U+FFFD), the
+    /// interpreter reported a font it could not decode, or the page carried
+    /// more than `MAX_ANNOTATIONS_PER_PAGE` annotations and their appearance
+    /// streams were skipped. Distinguishes "extraction failed" from "no text".
     pub degraded: bool,
     pub runs: Vec<TextRun>,
 }
@@ -89,7 +134,14 @@ fn extract_text_inner(input: &Path, options: &ExtractTextOptions) -> Result<Vec<
     let cache = InterpreterCache::new();
     Ok(selected
         .iter()
-        .map(|&page_number| extract_page(&pages[page_number - 1], page_number, &cache))
+        .map(|&page_number| {
+            extract_page(
+                &pages[page_number - 1],
+                page_number,
+                &cache,
+                options.annotations,
+            )
+        })
         .collect())
 }
 
@@ -113,9 +165,23 @@ fn load_pdf(data: Vec<u8>, password: Option<&str>, input: &Path) -> Result<Pdf> 
     })
 }
 
-fn extract_page<'a>(page: &Page<'a>, page_number: usize, cache: &InterpreterCache<'a>) -> PageText {
+fn extract_page<'a>(
+    page: &Page<'a>,
+    page_number: usize,
+    cache: &InterpreterCache<'a>,
+    annotations: bool,
+) -> PageText {
     let (width, height) = page.render_dimensions();
     let initial_transform = page.initial_transform(true).to_kurbo();
+
+    // Counting is cheap where resolving is not: `raw_iter` walks the array's
+    // bytes and never dereferences the `n 0 R` entries, so this costs
+    // microseconds even on the 32,768-annotation page it exists to catch.
+    let annotation_flood = annotations
+        && page.raw().get::<Array<'_>>(ANNOTS).is_some_and(|annots| {
+            annots.raw_iter().take(MAX_ANNOTATIONS_PER_PAGE + 1).count() > MAX_ANNOTATIONS_PER_PAGE
+        });
+    let annotations = annotations && !annotation_flood;
 
     let font_warning = Arc::new(AtomicBool::new(false));
     let sink_flag = font_warning.clone();
@@ -125,9 +191,14 @@ fn extract_page<'a>(page: &Page<'a>, page_number: usize, cache: &InterpreterCach
                 sink_flag.store(true, Ordering::Relaxed);
             }
         }),
-        // The text layer covers page content only; annotation appearance
-        // streams get their own layer in viewers (pdf.js does the same).
-        render_annotations: false,
+        // Appearance streams carry text that appears nowhere else in the
+        // output — filled form-field values above all — so they are part of
+        // the text layer, as they are for pdftotext and mutool. hayro skips
+        // annotations flagged Hidden (`/F` bit 2) but not NoView (bit 6),
+        // and does not special-case `/Popup`; both are upstream gaps pdq
+        // cannot filter from the outside (the annotation loop is inside
+        // `interpret_page`).
+        render_annotations: annotations,
         ..Default::default()
     };
 
@@ -146,7 +217,7 @@ fn extract_page<'a>(page: &Page<'a>, page_number: usize, cache: &InterpreterCach
         page: page_number,
         width,
         height,
-        degraded: missing_unicode || font_warning.load(Ordering::Relaxed),
+        degraded: missing_unicode || font_warning.load(Ordering::Relaxed) || annotation_flood,
         runs,
     }
 }
