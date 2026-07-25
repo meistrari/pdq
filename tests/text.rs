@@ -238,6 +238,32 @@ fn unmappable_glyphs_set_degraded_flag() {
     assert_eq!(page.runs[0].text, "\u{FFFD}\u{FFFD}\u{FFFD}");
 }
 
+/// Guards the AGL glyph-name mapping this repo carries as a hayro-interpret
+/// patch (LaurenzV/hayro#1277). The fixture has no ToUnicode, so the only
+/// route to Unicode is the glyph name, and none of its three names appear in
+/// the AGL verbatim — the specification derives them by stripping the variant
+/// suffix and splitting ligature components. Without the patch every glyph
+/// comes back as U+FFFD and the page is flagged degraded, so this test also
+/// fails loudly if the patch is ever dropped from Cargo.toml.
+///
+/// It therefore fails on a crates.io checkout, where cargo has stripped the
+/// [patch] table: that build genuinely does degrade this page. See
+/// .github/publish-patch-allowlist.txt for why shipping it that way is
+/// deliberate.
+#[test]
+fn algorithmic_glyph_names_resolve_without_tounicode() {
+    let pages = extract_all("text-glyph-names.pdf");
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+
+    assert_eq!(page.runs.len(), 1);
+    assert_eq!(page.runs[0].text, "fi-ffl");
+    assert!(
+        !page.degraded,
+        "every glyph name is recoverable, so the page must not be degraded"
+    );
+}
+
 #[test]
 fn page_selection_and_out_of_range_errors() {
     let options = ExtractTextOptions {

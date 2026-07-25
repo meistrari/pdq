@@ -16,7 +16,10 @@
 #   Output quality only: without it `pdq text` emits U+FFFD for glyph names
 #   the AGL defines algorithmically. Measured over the 1789-document corpus:
 #   4 documents affected, 62 extra replacement characters, 4 extra pages
-#   flagged degraded. No document fails to extract.
+#   flagged degraded. No document fails to extract. The behaviour is pinned
+#   by tests/text.rs::algorithmic_glyph_names_resolve_without_tounicode,
+#   which is expected to fail on a crates.io checkout for exactly this
+#   reason — it exists to catch the patch being dropped by accident here.
 #
 # Both degrade gracefully, so the published crate is correct without them.
 # The release binaries are built from this repo and do carry them.
