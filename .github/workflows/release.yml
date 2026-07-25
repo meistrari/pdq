@@ -106,17 +106,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Refuse to publish while carrying a [patch.crates-io] override
-        # cargo silently strips [patch] tables when packaging, so the
-        # published crate would build against the unpatched dependency
-        # and lose the fix the patch carries. Fail loudly instead.
+      - name: Check every [patch.crates-io] override is publish-safe
+        # cargo silently strips [patch] tables when packaging, so the published
+        # crate always builds against the unpatched dependency. Overrides whose
+        # loss only costs performance or output quality are reviewed and listed
+        # in the allowlist; anything else must be upstreamed before publishing.
         run: |
-          if grep -q '^\[patch\.crates-io\]' Cargo.toml; then
-            echo "Cargo.toml carries a [patch.crates-io] override; the" >&2
-            echo "published crate would silently drop it. Upstream the" >&2
-            echo "patched dependency before publishing to crates.io." >&2
-            exit 1
-          fi
+          allowlist=.github/publish-patch-allowlist.txt
+          patched="$(awk '
+            /^\[patch\.crates-io\]/ { in_patch = 1; next }
+            /^\[/                   { in_patch = 0 }
+            in_patch && /=/         { print $1 }
+          ' Cargo.toml)"
+          status=0
+          for crate in $patched; do
+            if grep -qxF "$crate" "$allowlist"; then
+              echo "note: $crate is allowlisted; publishing without its patch."
+            else
+              echo "Cargo.toml patches $crate, which is not in $allowlist." >&2
+              echo "The published crate would silently drop that patch." >&2
+              echo "Upstream it, or add it to the allowlist with a rationale" >&2
+              echo "for why losing it is safe for crates.io consumers." >&2
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Check if version is already on crates.io
         id: check

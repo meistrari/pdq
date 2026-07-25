@@ -59,6 +59,14 @@ To use pdq as a library, add it to your project:
 cargo add pdq
 ```
 
+The prebuilt binaries and a source build carry two fixes to hayro's
+interpreter that are still making their way upstream: memoized tint
+transforms (much faster `render` on Separation/DeviceN images) and AGL-spec
+glyph-name mapping (fewer U+FFFD in `pdq text`). cargo drops patched
+dependencies when publishing, so a crates.io build runs without them —
+correct and complete, just slower on those images and slightly more likely to
+flag a page `degraded`. They land for everyone on the next hayro release.
+
 ## Quick start
 
 ```sh

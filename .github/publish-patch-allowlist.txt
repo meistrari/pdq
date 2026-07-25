@@ -1,0 +1,23 @@
+# Crates whose [patch.crates-io] override is safe to drop when publishing.
+#
+# cargo strips [patch] tables when packaging, so the crate on crates.io always
+# builds against the unpatched dependency. A patch may only be listed here if
+# losing it costs performance or output quality — never correctness, and never
+# the ability to build. Anything load-bearing must be upstreamed first.
+#
+# One crate name per line; # starts a comment.
+
+# hayro-interpret (fork: Guiqft/hayro @ agl-glyph-names-0.7) carries two fixes:
+#
+# - tint-transform memoization (pdq#30). Pure performance: Separation/DeviceN
+#   images re-run the tint transform per pixel. Merged upstream in a more
+#   general form (LaurenzV/hayro#1290), pending a hayro-interpret release.
+# - AGL-spec glyph-name mapping (pdq#32, LaurenzV/hayro#1277, still open).
+#   Output quality only: without it `pdq text` emits U+FFFD for glyph names
+#   the AGL defines algorithmically. Measured over the 1789-document corpus:
+#   4 documents affected, 62 extra replacement characters, 4 extra pages
+#   flagged degraded. No document fails to extract.
+#
+# Both degrade gracefully, so the published crate is correct without them.
+# The release binaries are built from this repo and do carry them.
+hayro-interpret
