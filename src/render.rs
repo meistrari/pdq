@@ -9,6 +9,7 @@ use hayro::{
 use rayon::prelude::*;
 
 use crate::{
+    hayro_stack::{guard_nesting_depth, with_deep_stack, HAYRO_STACK_SIZE},
     range::{dedupe_preserving_order, PageRangeGroup},
     split::{render_output_pattern, validate_output_pattern},
     PdfOpsError, Result,
@@ -34,6 +35,10 @@ impl Default for RenderOptions {
 }
 
 pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions) -> Result<()> {
+    with_deep_stack(|| render_pages_inner(input, output_pattern, options))
+}
+
+fn render_pages_inner(input: &Path, output_pattern: &str, options: &RenderOptions) -> Result<()> {
     validate_output_pattern(output_pattern)?;
     if !options.dpi.is_finite() || options.dpi <= 0.0 {
         return Err(PdfOpsError::InvalidStructure(format!(
@@ -44,6 +49,7 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
     let scale = options.dpi / POINTS_PER_INCH;
 
     let data = fs::read(input)?;
+    guard_nesting_depth(&data, input)?;
     let pdf = Pdf::new(data).map_err(|err| load_error(err, input))?;
     let pages = pdf.pages();
 
@@ -87,7 +93,13 @@ pub fn render_pages(input: &Path, output_pattern: &str, options: &RenderOptions)
         Ok(())
     };
 
-    match rayon::ThreadPoolBuilder::new().build() {
+    // Object resolution and content-stream lexing happen on the workers, so
+    // they need the same stack headroom as the loading thread; rayon's
+    // default is Rust's 2 MiB, four times less than the main thread.
+    match rayon::ThreadPoolBuilder::new()
+        .stack_size(HAYRO_STACK_SIZE)
+        .build()
+    {
         Ok(pool) => pool.install(|| selected.par_iter().try_for_each(render_one)),
         Err(_) => selected.iter().try_for_each(render_one),
     }

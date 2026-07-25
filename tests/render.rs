@@ -175,6 +175,36 @@ fn render_rejects_nonpositive_dpi() {
     assert!(matches!(error, PdfOpsError::InvalidStructure(_)));
 }
 
+/// The companion to `deeply_nested_trailer_extracts_instead_of_aborting` in
+/// tests/text.rs: render aborted on the same file, and its rayon workers are
+/// the more fragile half (Rust's default 2 MiB stack against the loading
+/// thread's 8 MiB), so both paths need the check.
+#[test]
+fn deeply_nested_trailer_renders_instead_of_aborting() {
+    let input = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("corpus")
+        .join("qpdf-qtest/0413-issue-202.pdf");
+    if !input.exists() {
+        eprintln!("skipping: corpus not present");
+        return;
+    }
+
+    let temp = tempdir().unwrap();
+    let pattern = temp.path().join("nested-%d.png");
+    render_pages(
+        &input,
+        pattern.to_str().unwrap(),
+        &RenderOptions {
+            dpi: 20.0,
+            pages: Some(PageRangeGroup::parse("1").unwrap()),
+        },
+    )
+    .unwrap();
+
+    let (width, height) = png_dimensions(&temp.path().join("nested-01.png"));
+    assert!(width > 0 && height > 0);
+}
+
 #[test]
 fn render_cli_writes_selected_page() {
     let temp = tempdir().unwrap();

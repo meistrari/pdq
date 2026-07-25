@@ -2,6 +2,8 @@ pub mod copy;
 pub mod count;
 pub mod dimensions;
 mod filter;
+#[cfg(any(feature = "render", feature = "text"))]
+mod hayro_stack;
 pub mod lazy;
 pub mod load;
 pub mod merge;
