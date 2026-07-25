@@ -21,6 +21,22 @@ fn extract_all(name: &str) -> Vec<pdq::PageText> {
     extract_text(&fixture(name), &ExtractTextOptions::default()).unwrap()
 }
 
+/// Whether these tests are running against an unpacked crates.io release
+/// rather than a checkout of the repository.
+///
+/// It matters because cargo rewrites Cargo.toml when packaging and drops the
+/// [patch.crates-io] table, so a published crate necessarily builds against
+/// an unpatched hayro-interpret. Packaging leaves the untouched manifest
+/// beside the rewritten one as Cargo.toml.orig, which a git checkout never
+/// has — telling the two apart by the patch table alone is impossible, since
+/// a release and a patch someone deleted look identical from inside the
+/// build.
+fn is_packaged_crate() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("Cargo.toml.orig")
+        .exists()
+}
+
 /// Rasterize a page with hayro exactly like `pdq render` does at 72 dpi and
 /// return the ink bounding box in points, top-left origin.
 fn ink_bbox(name: &str, page_index: usize) -> (f64, f64, f64, f64) {
@@ -236,6 +252,36 @@ fn unmappable_glyphs_set_degraded_flag() {
     // The glyphs are still emitted, as replacement characters.
     assert_eq!(page.runs.len(), 1);
     assert_eq!(page.runs[0].text, "\u{FFFD}\u{FFFD}\u{FFFD}");
+}
+
+/// Guards the AGL glyph-name mapping this repo carries as a hayro-interpret
+/// patch (LaurenzV/hayro#1277). The fixture has no ToUnicode, so the only
+/// route to Unicode is the glyph name, and none of its three names appear in
+/// the AGL verbatim — the specification derives them by stripping the variant
+/// suffix and splitting ligature components. Without the patch every glyph
+/// comes back as U+FFFD and the page is flagged degraded, so this test fails
+/// loudly if the patch is ever dropped from Cargo.toml.
+///
+/// Skipped when testing an unpacked crates.io release, which by design has no
+/// patch to drop; see [`is_packaged_crate`] and
+/// .github/publish-patch-allowlist.txt.
+#[test]
+fn algorithmic_glyph_names_resolve_without_tounicode() {
+    if is_packaged_crate() {
+        eprintln!("skipping: the published crate builds without the hayro patch");
+        return;
+    }
+
+    let pages = extract_all("text-glyph-names.pdf");
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+
+    assert_eq!(page.runs.len(), 1);
+    assert_eq!(page.runs[0].text, "fi-ffl");
+    assert!(
+        !page.degraded,
+        "every glyph name is recoverable, so the page must not be degraded"
+    );
 }
 
 #[test]

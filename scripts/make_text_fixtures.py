@@ -11,6 +11,9 @@ All fixtures are tiny, uncompressed, hand-checkable PDFs:
   text-degraded.pdf  a Type3 font with no ToUnicode: the glyph renders but
                      has no Unicode mapping, so extraction must flag the
                      page as degraded.
+  text-glyph-names.pdf  no ToUnicode either, but the /Differences names are
+                     resolvable through the AGL's algorithmic rules, so
+                     extraction must recover them rather than degrade.
 """
 from pathlib import Path
 
@@ -96,10 +99,25 @@ def make_degraded():
         page_pdf(content, font=font, extra_objs=[glyph]))
 
 
+def make_glyph_names():
+    # None of these names are in the AGL as written: the specification
+    # defines them algorithmically, by stripping the variant suffix after
+    # the first period and splitting ligatures on underscores. A reader that
+    # only does a flat table lookup sees three unmappable glyphs and degrades
+    # the page; resolving them yields "fi", "-" and "ffl".
+    font = (b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica"
+            b"/Encoding<</Type/Encoding/Differences"
+            b"[65/f_i 66/hyphen.case 67/f_f_l]>>>>")
+    content = b"BT /F1 12 Tf 72 720 Td (ABC) Tj ET"
+    (FIXTURES / "text-glyph-names.pdf").write_bytes(
+        page_pdf(content, font=font))
+
+
 if __name__ == "__main__":
     make_simple()
     make_rotate90()
     make_image_only()
     make_degraded()
+    make_glyph_names()
     for f in sorted(FIXTURES.glob("text-*.pdf")):
         print(f.name, f.stat().st_size, "bytes")
