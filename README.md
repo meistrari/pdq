@@ -258,6 +258,13 @@ hayro interpreter `render` uses, and prints a JSON array to stdout:
   approximate glyph top (baseline minus 0.8 × `font_size`), `width` the sum
   of glyph advances, and `height` equals `font_size`; text made vertical by
   `/Rotate` yields a narrow, tall box instead.
+- **Runs are not clipped to the page.** A run's box may fall partly or wholly
+  outside `[0, page_width] x [0, page_height]`, including at negative
+  coordinates — content painted past the MediaBox, such as a wide table
+  overflowing the sheet, or a CropBox smaller than the MediaBox. Clip the
+  rectangle for display; do not filter the run out, or you lose that text.
+  mutool, pdf.js and poppler under `-cropbox` all discard it, so pdq's output
+  is a superset of theirs.
 - Word gaps encoded as TJ kerning offsets instead of space glyphs (LaTeX
   output) are synthesized as spaces, like poppler and pdf.js do: a gap of
   0.1–0.6 em past a glyph's advance becomes `' '`, anything wider starts a
