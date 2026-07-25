@@ -36,6 +36,8 @@ const WORD_GAP_MIN: f64 = 0.1;
 /// `SPACE_IN_FLOW_MAX_FACTOR`); anything wider starts a new run.
 const WORD_GAP_MAX: f64 = 0.6;
 
+const MEMORY_INPUT_LABEL: &str = "<memory>";
+
 #[derive(Debug, Clone, Default)]
 pub struct ExtractTextOptions {
     pub pages: Option<PageRangeGroup>,
@@ -72,7 +74,23 @@ pub struct PageText {
 
 pub fn extract_text(input: &Path, options: &ExtractTextOptions) -> Result<Vec<PageText>> {
     let data = fs::read(input)?;
-    let pdf = load_pdf(data, options.password.as_deref(), input)?;
+    extract_text_from_bytes_with_label(data, options, input)
+}
+
+/// Like [`extract_text`], but takes an in-memory PDF instead of a file path.
+pub fn extract_text_from_bytes(
+    input: &[u8],
+    options: &ExtractTextOptions,
+) -> Result<Vec<PageText>> {
+    extract_text_from_bytes_with_label(input.to_vec(), options, Path::new(MEMORY_INPUT_LABEL))
+}
+
+fn extract_text_from_bytes_with_label(
+    input: Vec<u8>,
+    options: &ExtractTextOptions,
+    label: &Path,
+) -> Result<Vec<PageText>> {
+    let pdf = load_pdf(input, options.password.as_deref(), label)?;
     let pages = pdf.pages();
 
     let selected = match &options.pages {

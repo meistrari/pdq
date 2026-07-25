@@ -1,0 +1,13 @@
+[package]
+name = "pdq-wasm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys = "0.3"
+pdq = { path = "../..", default-features = false, features = ["render", "text"] }
+wasm-bindgen = "0.2"
