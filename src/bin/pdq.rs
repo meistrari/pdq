@@ -128,6 +128,10 @@ struct TextArgs {
     /// Password for encrypted inputs
     #[arg(long, value_name = "PASSWORD")]
     password: Option<String>,
+
+    /// Skip annotation and form-field appearance streams (page content only)
+    #[arg(long)]
+    no_annotations: bool,
 }
 
 #[cfg(feature = "dhat-heap")]
@@ -196,6 +200,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let options = pdq::ExtractTextOptions {
                 pages: args.pages.map(PageRangeGroup::parse).transpose()?,
                 password: args.password,
+                annotations: !args.no_annotations,
             };
             let pages = pdq::extract_text(&args.input, &options)?;
             println!("{}", pdq::text::pages_to_json(&pages));

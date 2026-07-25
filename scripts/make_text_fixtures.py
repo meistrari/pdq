@@ -14,6 +14,10 @@ All fixtures are tiny, uncompressed, hand-checkable PDFs:
   text-glyph-names.pdf  no ToUnicode either, but the /Differences names are
                      resolvable through the AGL's algorithmic rules, so
                      extraction must recover them rather than degrade.
+  text-annotations.pdf  one page word plus three /Widget annotations whose
+                     /AP /N appearance streams each draw a distinct word:
+                     a normal one (/F 4), a Hidden one (/F 2) and a NoView
+                     one (/F 32).
 """
 from pathlib import Path
 
@@ -113,11 +117,39 @@ def make_glyph_names():
         page_pdf(content, font=font))
 
 
+def make_annotations():
+    # Widget appearance streams are form XObjects placed at the annotation's
+    # /Rect, so each word lands inside its own widget rectangle. The flags
+    # are the three cases text extraction has to distinguish: 4 = Print,
+    # 2 = Hidden (never extracted), 32 = NoView (poppler and mupdf suppress
+    # it, hayro does not).
+    def widget(rect: bytes, flags: int, ap: int) -> bytes:
+        return (b"<</Type/Annot/Subtype/Widget/FT/Tx/T(field%d)"
+                b"/Rect[%s]/F %d/AP<</N %d 0 R>>>>" % (ap, rect, flags, ap))
+
+    def appearance(word: bytes) -> bytes:
+        return stream(
+            b"/Type/XObject/Subtype/Form/BBox[0 0 100 20]"
+            b"/Resources<</Font<</F1 4 0 R>>>>",
+            b"BT /F1 12 Tf 2 4 Td (%s) Tj ET" % word)
+
+    content = b"BT /F1 18 Tf 72 720 Td (Content) Tj ET"
+    (FIXTURES / "text-annotations.pdf").write_bytes(page_pdf(
+        content,
+        extra_page=b"/Annots[6 0 R 8 0 R 10 0 R]",
+        extra_objs=[
+            widget(b"200 600 300 620", 4, 7), appearance(b"Filled"),
+            widget(b"200 560 300 580", 2, 9), appearance(b"Hidden"),
+            widget(b"200 520 300 540", 32, 11), appearance(b"Noview"),
+        ]))
+
+
 if __name__ == "__main__":
     make_simple()
     make_rotate90()
     make_image_only()
     make_degraded()
     make_glyph_names()
+    make_annotations()
     for f in sorted(FIXTURES.glob("text-*.pdf")):
         print(f.name, f.stat().st_size, "bytes")

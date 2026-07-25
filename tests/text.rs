@@ -31,6 +31,14 @@ fn corpus_file(relative: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+fn run_texts(pages: &[pdq::PageText]) -> Vec<&str> {
+    pages
+        .iter()
+        .flat_map(|p| &p.runs)
+        .map(|r| r.text.as_str())
+        .collect()
+}
+
 /// Whether these tests are running against an unpacked crates.io release
 /// rather than a checkout of the repository.
 ///
@@ -294,6 +302,131 @@ fn algorithmic_glyph_names_resolve_without_tounicode() {
     );
 }
 
+/// The default must extract appearance-stream text, and it must do so through
+/// `ExtractTextOptions::default()` specifically: a derived `Default` would
+/// leave the flag `false` and silently reinstate the data loss for every
+/// caller, including the CLI.
+#[test]
+fn annotation_appearance_streams_are_extracted_by_default() {
+    let pages = extract_all("text-annotations.pdf");
+    let texts = run_texts(&pages);
+    assert!(texts.contains(&"Content"), "{texts:?}");
+    assert!(texts.contains(&"Filled"), "{texts:?}");
+
+    // The widget's value lands inside the widget's /Rect [200 600 300 620],
+    // converted to the top-left origin the JSON uses.
+    let filled = pages[0]
+        .runs
+        .iter()
+        .find(|r| r.text == "Filled")
+        .expect("filled widget value");
+    assert!(
+        (200.0..=300.0).contains(&filled.x),
+        "filled.x = {}",
+        filled.x
+    );
+    assert!(
+        (792.0 - 620.0..=792.0 - 600.0).contains(&filled.y),
+        "filled.y = {}",
+        filled.y
+    );
+}
+
+/// Hidden annotations (`/F` bit 2) are invisible on the page, so their text
+/// must never reach the output under any option.
+#[test]
+fn hidden_annotations_are_never_extracted() {
+    for annotations in [true, false] {
+        let options = ExtractTextOptions {
+            annotations,
+            ..Default::default()
+        };
+        let pages = extract_text(&fixture("text-annotations.pdf"), &options).unwrap();
+        assert!(
+            !run_texts(&pages).contains(&"Hidden"),
+            "hidden widget extracted with annotations={annotations}"
+        );
+    }
+}
+
+/// Known limitation, pinned deliberately: NoView (`/F` bit 6) annotations are
+/// printed but not displayed, and poppler, mupdf and pdf-oxide all suppress
+/// them. hayro's annotation loop only checks the Hidden bit, and pdq cannot
+/// filter from the outside — the loop is inside `interpret_page` and every
+/// hook it would need is `pub(crate)`. If a hayro upgrade starts honouring
+/// the flag this test fails, which is the point: update it and the README
+/// limitation together rather than letting the two drift.
+#[test]
+fn noview_annotations_are_extracted_as_upstream_does() {
+    let pages = extract_all("text-annotations.pdf");
+    let texts = run_texts(&pages);
+    assert!(texts.contains(&"Noview"), "{texts:?}");
+}
+
+#[test]
+fn annotations_can_be_disabled() {
+    let options = ExtractTextOptions {
+        annotations: false,
+        ..Default::default()
+    };
+    let pages = extract_text(&fixture("text-annotations.pdf"), &options).unwrap();
+    assert_eq!(run_texts(&pages), ["Content"]);
+}
+
+/// Appearance streams are drawn through the same device as page content, so a
+/// widget whose value also appears in the content stream could in principle be
+/// emitted twice. Nothing deduplicates runs, so the absence of overlap is a
+/// property worth holding onto.
+#[test]
+fn annotation_runs_do_not_duplicate_page_content() {
+    let pages = extract_all("text-annotations.pdf");
+    let runs = &pages[0].runs;
+    for (i, a) in runs.iter().enumerate() {
+        for b in &runs[i + 1..] {
+            let overlaps = a.x < b.x + b.width
+                && b.x < a.x + a.width
+                && a.y < b.y + b.height
+                && b.y < a.y + a.height;
+            assert!(
+                !(a.text.trim() == b.text.trim() && overlaps),
+                "run '{}' emitted twice at overlapping positions",
+                a.text
+            );
+        }
+    }
+}
+
+#[test]
+fn text_cli_includes_annotations_unless_opted_out() {
+    let with_annots = pdq()
+        .arg("text")
+        .arg(fixture("text-annotations.pdf"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&with_annots).unwrap();
+    let runs = value[0]["runs"].as_array().unwrap();
+    let texts: Vec<&str> = runs.iter().map(|r| r["text"].as_str().unwrap()).collect();
+    assert!(texts.contains(&"Filled"), "{texts:?}");
+    assert!(!texts.contains(&"Hidden"), "{texts:?}");
+
+    let without = pdq()
+        .arg("text")
+        .arg("--no-annotations")
+        .arg(fixture("text-annotations.pdf"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&without).unwrap();
+    let runs = value[0]["runs"].as_array().unwrap();
+    let texts: Vec<&str> = runs.iter().map(|r| r["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["Content"]);
+}
+
 /// hayro-syntax's object lexer has no recursion cap, so deeply nested
 /// dictionaries used to overflow the stack and abort the process (exit 134,
 /// no unwinding). `corpus/qpdf-qtest/0413-issue-202.pdf` nests its *trailer*
@@ -328,6 +461,107 @@ fn deeply_nested_trailer_extracts_instead_of_aborting() {
     assert!(
         texts.contains(&"Sample PDF Document"),
         "the file extracts real text once the stack is big enough: {texts:?}"
+    );
+}
+
+/// A one-page PDF carrying `count` widget annotations, all sharing one
+/// appearance stream that draws the word "Note", over page content that draws
+/// "Body". Built rather than committed because the interesting counts are in
+/// the thousands.
+fn write_annotation_flood(path: &std::path::Path, count: usize) {
+    const FONT: usize = 4;
+    const APPEARANCE: usize = 5;
+    const CONTENTS: usize = 6;
+    const FIRST_ANNOT: usize = 7;
+
+    let appearance = b"BT /F1 12 Tf 2 4 Td (Note) Tj ET";
+    let contents = b"BT /F1 12 Tf 20 100 Td (Body) Tj ET";
+    let annots = (0..count)
+        .map(|i| format!("{} 0 R", FIRST_ANNOT + i))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut bodies = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents {CONTENTS} 0 R\
+             /Resources<</Font<</F1 {FONT} 0 R>>>>/Annots[{annots}]>>"
+        ),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+        format!(
+            "<</Type/XObject/Subtype/Form/BBox[0 0 60 20]\
+             /Resources<</Font<</F1 {FONT} 0 R>>>>/Length {}>>\nstream\n{}\nendstream",
+            appearance.len(),
+            String::from_utf8_lossy(appearance)
+        ),
+        format!(
+            "<</Length {}>>\nstream\n{}\nendstream",
+            contents.len(),
+            String::from_utf8_lossy(contents)
+        ),
+    ];
+    bodies.extend((0..count).map(|_| {
+        format!("<</Type/Annot/Subtype/Widget/Rect[10 10 70 30]/F 4/AP<</N {APPEARANCE} 0 R>>>>")
+    }));
+
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::with_capacity(bodies.len());
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref_at = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+    );
+    for offset in &offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref_at}\n%%EOF\n",
+            bodies.len() + 1
+        )
+        .as_bytes(),
+    );
+    std::fs::write(path, &pdf).unwrap();
+}
+
+/// A page carrying more annotations than any real document skips their
+/// appearance streams, because hayro-syntax resolves each one by rebuilding
+/// its object stream's whole offset table — 32,768 `/Link` annotations in
+/// `corpus/pdfjs/bug1978317.pdf` cost 25 s and yield no text. Page content is
+/// untouched and the page is marked degraded so the omission is visible.
+#[test]
+fn an_annotation_flood_is_skipped_and_marked_degraded() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let at_cap = temp.path().join("at-cap.pdf");
+    write_annotation_flood(&at_cap, 4_096);
+    let pages = extract_text(&at_cap, &ExtractTextOptions::default()).unwrap();
+    assert!(
+        run_texts(&pages).contains(&"Note"),
+        "the cap itself must still be extracted: {:?}",
+        run_texts(&pages)
+    );
+    assert!(!pages[0].degraded);
+
+    let past_cap = temp.path().join("past-cap.pdf");
+    write_annotation_flood(&past_cap, 4_097);
+    let pages = extract_text(&past_cap, &ExtractTextOptions::default()).unwrap();
+    let texts = run_texts(&pages);
+    assert!(
+        texts.contains(&"Body"),
+        "page content survives the skip: {texts:?}"
+    );
+    assert!(
+        !texts.contains(&"Note"),
+        "annotations past the cap must be skipped: {texts:?}"
+    );
+    assert!(
+        pages[0].degraded,
+        "a skipped annotation layer must be reported, not dropped silently"
     );
 }
 
