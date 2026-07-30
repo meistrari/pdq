@@ -146,8 +146,8 @@ fn padded_ops(base: &[u8], pad: usize, seed: &mut u64) -> Vec<u8> {
 }
 
 /// Padding inside a `%` comment. Some producers emit comments in content
-/// streams; strict parsers reject them, which forces pdq's split onto its
-/// no-prune fallback path.
+/// streams; pdq strips them (they are whitespace per ISO 32000-1 §7.2.4)
+/// before the strict content parse so pruning still runs.
 fn comment_padded_ops(base: &[u8], pad: usize, seed: &mut u64) -> Vec<u8> {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut ops = base.to_vec();
@@ -742,6 +742,106 @@ fn build_trf4_like(path: &Path, pages: usize, comment_padding: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// FPDI wrapper fixture (re-exported scan bundles)
+// ---------------------------------------------------------------------------
+
+/// Replica of the FPDI re-export shape that defeats page-level prune gating:
+/// each page's /Resources holds a
+/// single wrapper form (/Xf1, /Xf2, ...), and the whole-document /TPLn
+/// catalog is an inline dictionary inside that wrapper's own /Resources —
+/// one level below where the page-level gate counts names. TPL content
+/// starts with a scanner-firmware comment followed by a blank line, which
+/// strict lopdf content parsing rejects unless comments are stripped first.
+fn build_fpdi_wrapper_like(path: &Path, pages: usize) {
+    let seed = &mut 0x0bad_cafe_f00d_u64;
+    let mut pdf = RawPdf::new(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+
+    let pages_obj = pdf.reserve();
+    let font = pdf
+        .add(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".to_vec());
+
+    // shared TPL forms, one per page; content opens with the Canon comment
+    // and a blank line, and draws padded text
+    let mut tpls = Vec::with_capacity(pages);
+    for i in 0..pages {
+        // F1 is referenced by the incompressible padding `padded_ops` appends
+        let nested = pdf.add(
+            format!("<</ProcSet[/PDF/Text]/Font<</F1 {font} 0 R/F3 {font} 0 R>>/XObject<<>>>>")
+                .into_bytes(),
+        );
+        let mut ops = b"% CANON_PFINF_TYPE0_TEXTON\n\n".to_vec();
+        writeln!(
+            ops,
+            "BT 3 Tr /F3 8.5 Tf 1 0 0 1 50.76 504.36 Td (Extrato folha {}) Tj ET",
+            i + 1
+        )
+        .unwrap();
+        let dict = format!(
+            "/Type/XObject/Subtype/Form/FormType 1/BBox[0 0 843.12 596.16]\
+             /Resources {nested} 0 R/Filter/FlateDecode"
+        );
+        tpls.push(pdf.add_stream(dict.as_bytes(), &deflate(&padded_ops(&ops, 2000, seed))));
+    }
+
+    // the inline TPL catalog repeated inside every wrapper form, as FPDI
+    // writes it
+    let mut catalog_entries = String::new();
+    for (i, tpl) in tpls.iter().enumerate() {
+        write!(catalog_entries, "/TPL{i} {tpl} 0 R").unwrap();
+    }
+
+    let mut page_ids = Vec::with_capacity(pages);
+    for i in 0..pages {
+        let wrapper_ops = format!(
+            "2 J\n0.57 w\nBT /F1 6.00 Tf ET\n\
+             q 0 J 1 w 0 j 0 G 0 g 0.7060 0 0 1.4122 0.0000 0.0000 cm /TPL{i} Do Q\n\
+             BT /F1 6.00 Tf ET\n"
+        );
+        let wrapper_dict = format!(
+            "/Type/XObject/Subtype/Form/FormType 1/BBox[0 0 595.28 841.89]\
+             /Resources<</ProcSet[/PDF/Text]/Font<</F1 {font} 0 R>>\
+             /XObject<<{catalog_entries}>>>>/Filter/FlateDecode"
+        );
+        let wrapper = pdf.add_stream(wrapper_dict.as_bytes(), &deflate(wrapper_ops.as_bytes()));
+
+        let content = pdf.add_stream(
+            b"/Filter/FlateDecode",
+            &deflate(format!("q 0.9990 0 0 0.9990 0 0 cm /Xf{} Do Q\n", i + 1).as_bytes()),
+        );
+        let page_id = pdf.add(
+            format!(
+                "<</Type/Page/Parent {pages_obj} 0 R\
+                 /Resources<</ProcSet[/PDF/Text]/XObject<</Xf{} {wrapper} 0 R>>>>\
+                 /Contents {content} 0 R>>",
+                i + 1
+            )
+            .into_bytes(),
+        );
+        page_ids.push(page_id);
+    }
+
+    pdf.put(pages_obj, {
+        let mut body = b"<</Type/Pages/Kids[".to_vec();
+        for page_id in &page_ids {
+            write!(body, "{page_id} 0 R ").unwrap();
+        }
+        write!(body, "]/Count {pages}/MediaBox[0 0 595.28 841.89]>>").unwrap();
+        body
+    });
+
+    let info = pdf.add(
+        b"<</Producer(FPDF 1.86)/Title(Documento Unificado)\
+          /CreationDate(D:20260101120000-03'00')>>"
+            .to_vec(),
+    );
+    let catalog = pdf.add(format!("<</Type/Catalog/Pages {pages_obj} 0 R>>").into_bytes());
+    pdf.write_to(
+        path,
+        format!("/Root {catalog} 0 R/Info {info} 0 R").as_bytes(),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -1030,6 +1130,70 @@ fn trf4_like_split_pages_prunes_the_shared_resource_dictionary() {
 }
 
 #[test]
+fn fpdi_wrapper_like_split_pages_prunes_the_nested_template_catalog() {
+    // FPDI-wrapper regression: the page-level gate sees a single /XfN name
+    // and declines, so the prune decision must be re-made at the wrapper
+    // form itself, whose own /Resources carries the whole /TPLn catalog.
+    // Before per-level gating, such inputs inflated to hundreds of times
+    // their size on split.
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("fpdi-wrapper-like.pdf");
+    build_fpdi_wrapper_like(&input, TRF4_PAGES);
+    let out_dir = temp.path().join("out");
+    fs::create_dir(&out_dir).unwrap();
+
+    split_pages(&input, out_dir.join("page-%d.pdf").to_str().unwrap()).unwrap();
+
+    let input_len = fs::metadata(&input).unwrap().len();
+    let qpdf = QpdfValidator::detect();
+    for page in [1, 30, TRF4_PAGES] {
+        let path = out_dir.join(split_page_name(page, TRF4_PAGES));
+        let document = Document::load(&path).unwrap();
+        let page_id = single_page_id(&document);
+        let names = page_xobject_names(&document, page_id);
+        assert_eq!(
+            names,
+            vec![format!("Xf{page}")],
+            "page {page} must keep its wrapper form"
+        );
+
+        // the wrapper's own resources must keep only the template this page
+        // draws, not the whole catalog
+        let page_dict = document.get_object(page_id).unwrap().as_dict().unwrap();
+        let resources = resolve_dict(&document, page_dict.get(b"Resources").unwrap());
+        let xobjects = resolve_dict(&document, resources.get(b"XObject").unwrap());
+        let wrapper = match xobjects.get(format!("Xf{page}").as_bytes()).unwrap() {
+            Object::Reference(id) => document.get_object(*id).unwrap().as_stream().unwrap(),
+            other => panic!("wrapper form should be indirect, found {other:?}"),
+        };
+        let wrapper_resources = resolve_dict(&document, wrapper.dict.get(b"Resources").unwrap());
+        let templates = resolve_dict(&document, wrapper_resources.get(b"XObject").unwrap());
+        let template_names: Vec<String> = templates
+            .iter()
+            .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        assert_eq!(
+            template_names,
+            vec![format!("TPL{}", page - 1)],
+            "page {page} must keep only its own template inside the wrapper"
+        );
+        qpdf.validate(&path, 1);
+    }
+
+    // regression guard: without per-level gating each output embeds the
+    // whole nested catalog and its closure
+    let mut largest = 0;
+    for entry in fs::read_dir(&out_dir).unwrap() {
+        largest = largest.max(fs::metadata(entry.unwrap().path()).unwrap().len());
+    }
+    assert!(
+        largest < input_len / 3,
+        "single-page output of {largest} bytes suggests the nested template \
+         catalog was copied unpruned (input is {input_len} bytes)"
+    );
+}
+
+#[test]
 fn trf4_like_split_output_resolves_inherited_media_box() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("trf4-like.pdf");
@@ -1215,8 +1379,8 @@ fn page_count_rejects_direct_page_tree_kids() {
 
 #[test]
 fn trf4_like_with_content_comments_still_splits_into_valid_pages() {
-    // % comments in content streams defeat strict content parsing, which
-    // disables resource pruning; outputs get bigger but must stay correct
+    // % comments in content streams are whitespace (ISO 32000-1 §7.2.4);
+    // pdq strips them before the strict parse, so pruning must survive them
     let temp = tempdir().unwrap();
     let input = temp.path().join("trf4-like-comments.pdf");
     build_trf4_like(&input, TRF4_PAGES, true);
@@ -1231,7 +1395,14 @@ fn trf4_like_with_content_comments_still_splits_into_valid_pages() {
     let qpdf = QpdfValidator::detect();
     for page in [1, TRF4_PAGES] {
         let path = out_dir.join(split_page_name(page, TRF4_PAGES));
-        assert_eq!(Document::load(&path).unwrap().get_pages().len(), 1);
+        let document = Document::load(&path).unwrap();
+        assert_eq!(document.get_pages().len(), 1);
+        let names = page_xobject_names(&document, single_page_id(&document));
+        assert_eq!(
+            names,
+            vec![format!("TPL{}", page - 1)],
+            "comments are whitespace; pruning must still run on page {page}"
+        );
         qpdf.validate(&path, 1);
     }
 }
