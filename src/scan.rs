@@ -223,7 +223,8 @@ fn collect_form_names(
 }
 
 fn scan_names(data: &[u8]) -> Option<UsedNames> {
-    let content = Content::decode_strict(data).ok()?;
+    let data = strip_comments(data);
+    let content = Content::decode_strict(&data).ok()?;
     let mut used = UsedNames::default();
     let mut last_name: Option<&[u8]> = None;
 
@@ -243,6 +244,94 @@ fn scan_names(data: &[u8]) -> Option<UsedNames> {
     }
 
     Some(used)
+}
+
+/// Replace `%` comments with spaces so `Content::decode_strict` sees them as
+/// the white-space ISO 32000-1 §7.2.4 says they are. lopdf only tolerates a
+/// comment immediately before an operation; producers such as Canon scanner
+/// firmware emit them mid-stream (`% CANON_PFINF_TYPE0_TEXTON` followed by a
+/// blank line), which would otherwise fail the strict parse and disable
+/// resource pruning for the whole page or form.
+///
+/// A `%` inside a literal or hex string is data and is left alone. Content
+/// containing an inline image is returned unchanged: its binary payload may
+/// contain `%` bytes that must not be treated as comment starts, so those
+/// streams keep the parse-or-fallback behavior they have today.
+fn strip_comments(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+
+    if memchr::memchr(b'%', data).is_none() {
+        return Cow::Borrowed(data);
+    }
+
+    enum State {
+        Normal,
+        LiteralString { depth: usize },
+        HexString,
+        Comment,
+    }
+    fn is_boundary(byte: Option<u8>) -> bool {
+        match byte {
+            None => true,
+            Some(byte) => byte.is_ascii_whitespace() || b"()<>[]{}/%".contains(&byte),
+        }
+    }
+
+    let mut out = data.to_vec();
+    let mut state = State::Normal;
+    let mut index = 0;
+    while index < out.len() {
+        let byte = out[index];
+        match state {
+            State::Normal => match byte {
+                b'%' => {
+                    state = State::Comment;
+                    continue;
+                }
+                b'(' => state = State::LiteralString { depth: 1 },
+                b'<' => {
+                    if out.get(index + 1) == Some(&b'<') {
+                        index += 1;
+                    } else {
+                        state = State::HexString;
+                    }
+                }
+                b'B' if out.get(index + 1) == Some(&b'I')
+                    && is_boundary(index.checked_sub(1).map(|i| out[i]))
+                    && is_boundary(out.get(index + 2).copied()) =>
+                {
+                    return Cow::Borrowed(data);
+                }
+                _ => {}
+            },
+            State::LiteralString { depth } => match byte {
+                b'\\' => index += 1,
+                b'(' => state = State::LiteralString { depth: depth + 1 },
+                b')' => {
+                    state = if depth > 1 {
+                        State::LiteralString { depth: depth - 1 }
+                    } else {
+                        State::Normal
+                    };
+                }
+                _ => {}
+            },
+            State::HexString => {
+                if byte == b'>' {
+                    state = State::Normal;
+                }
+            }
+            State::Comment => {
+                if byte == b'\r' || byte == b'\n' {
+                    state = State::Normal;
+                    continue;
+                }
+                out[index] = b' ';
+            }
+        }
+        index += 1;
+    }
+    Cow::Owned(out)
 }
 
 fn scan_names_cached(
@@ -459,7 +548,9 @@ fn all_named_resources_resolve(
 
 #[cfg(test)]
 mod tests {
-    use super::scan_names;
+    use std::borrow::Cow;
+
+    use super::{scan_names, strip_comments};
 
     #[test]
     fn scans_names_used_by_resource_operators() {
@@ -474,5 +565,39 @@ mod tests {
     #[test]
     fn strict_scan_rejects_trailing_invalid_content() {
         assert!(scan_names(b"/TPL0 Do @@@").is_none());
+    }
+
+    #[test]
+    fn scan_survives_mid_stream_comments() {
+        // Canon scanner shape: comment, blank line, then operations. lopdf
+        // only accepts a comment immediately before an operation, so without
+        // stripping this fails the strict parse and pruning is disabled.
+        let used =
+            scan_names(b"% CANON_PFINF_TYPE0_TEXTON\n\nq /TPL5 Do Q\nBT /F1 % sizes\n12 Tf ET")
+                .unwrap();
+        assert!(used.contains(b"TPL5"));
+        assert!(used.contains(b"F1"));
+    }
+
+    #[test]
+    fn strip_comments_leaves_percent_inside_strings() {
+        let data = b"BT (100% juros \\(a.m.\\)) Tj ET <25AB> Tj % real comment\n/F1 12 Tf";
+        let stripped = strip_comments(data);
+        assert!(stripped.windows(4).any(|w| w == b"100%"));
+        assert!(stripped.windows(4).any(|w| w == b"<25A"));
+        assert!(!stripped.windows(4).any(|w| w == b"real"));
+    }
+
+    #[test]
+    fn strip_comments_borrows_when_there_is_nothing_to_strip() {
+        assert!(matches!(strip_comments(b"q /X Do Q"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strip_comments_declines_inline_images() {
+        // '%' inside the binary inline-image payload must not be treated as a
+        // comment; the stream is handed to the parser unchanged.
+        let data = b"% c\nBI /W 2 /H 2 /CS /G /BPC 8 ID \x25\xF1\x00\xFF EI Q";
+        assert!(matches!(strip_comments(data), Cow::Borrowed(_)));
     }
 }

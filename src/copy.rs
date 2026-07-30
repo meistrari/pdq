@@ -492,7 +492,7 @@ impl CopyContext {
         depth: usize,
     ) -> Result<Dictionary> {
         check_copy_depth(depth)?;
-        if !self.options.prune_resources || !self.prune_nested_resources || !is_form_xobject(dict) {
+        if !self.options.prune_resources || !is_form_xobject(dict) {
             return self.copy_dictionary(source, target, dict, depth + 1);
         }
 
@@ -502,6 +502,15 @@ impl CopyContext {
         let Some(resources) = self.resolve_dictionary(source, resources_value)? else {
             return self.copy_dictionary(source, target, dict, depth + 1);
         };
+        // Outside an already-pruning copy, gate on the form's own resource
+        // dictionary. FPDI-style wrappers hide the whole-document /TPLn
+        // catalog one level down: the page has a single /XfN entry (below
+        // the page-level gate), and the catalog sits in that form's own
+        // /Resources, so the decision must be made per level, where the
+        // names actually live.
+        if !self.prune_nested_resources && !self.should_prune_resources(source, &resources)? {
+            return self.copy_dictionary(source, target, dict, depth + 1);
+        }
         let Some(used) = scan::collect_used_names_from_stream(
             source,
             stream_id,
