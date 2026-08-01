@@ -1,0 +1,99 @@
+%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Pattern << /P1 8 0 R >> >> /Contents 7 0 R >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Pattern << /P1 9 0 R >> >> /Contents 7 0 R >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Pattern << /P1 10 0 R >> >> /Contents 7 0 R >>
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Pattern << /P1 11 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 41 >>
+stream
+q
+/Pattern cs /P1 scn
+0 0 595 842 re f
+Q
+endstream
+endobj
+8 0 obj
+<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 /BBox [0 0 595 842] /XStep 99999 /YStep 99999 /Matrix [1 0 0 1 0 0] /Resources << /ProcSet [/PDF] >> /Length 120 >>
+stream
+1 0 0 rg
+0 421 297.5 421 re f
+0 0.6 0 rg
+297.5 0 297.5 421 re f
+0 0 1 rg
+400 600 50 50 re f
+0 0 0 rg
+100 0 1.5 842 re f
+endstream
+endobj
+9 0 obj
+<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 /BBox [0 0 595 842] /XStep 99999 /YStep 99999 /Matrix [1 0 0 1 -99999 -99999] /Resources << /ProcSet [/PDF] >> /Length 120 >>
+stream
+1 0 0 rg
+0 421 297.5 421 re f
+0 0.6 0 rg
+297.5 0 297.5 421 re f
+0 0 1 rg
+400 600 50 50 re f
+0 0 0 rg
+100 0 1.5 842 re f
+endstream
+endobj
+10 0 obj
+<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 /BBox [0 0 595 842] /XStep 99999 /YStep 99999 /Matrix [1 0 0 1 -50000 0] /Resources << /ProcSet [/PDF] >> /Length 120 >>
+stream
+1 0 0 rg
+0 421 297.5 421 re f
+0 0.6 0 rg
+297.5 0 297.5 421 re f
+0 0 1 rg
+400 600 50 50 re f
+0 0 0 rg
+100 0 1.5 842 re f
+endstream
+endobj
+11 0 obj
+<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 /BBox [0 0 595 842] /XStep -99999 /YStep -99999 /Matrix [1 0 0 1 0 0] /Resources << /ProcSet [/PDF] >> /Length 120 >>
+stream
+1 0 0 rg
+0 421 297.5 421 re f
+0 0.6 0 rg
+297.5 0 297.5 421 re f
+0 0 1 rg
+400 600 50 50 re f
+0 0 0 rg
+100 0 1.5 842 re f
+endstream
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000133 00000 n 
+0000000262 00000 n 
+0000000391 00000 n 
+0000000521 00000 n 
+0000000651 00000 n 
+0000000741 00000 n 
+0000001069 00000 n 
+0000001407 00000 n 
+0000001741 00000 n 
+trailer
+<< /Size 12 /Root 1 0 R >>
+startxref
+2072
+%%EOF

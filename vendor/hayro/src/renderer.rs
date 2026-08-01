@@ -508,8 +508,102 @@ impl Renderer {
 
                         let scaled_width = bbox.width() as f32 * xs;
                         let scaled_height = bbox.height() as f32 * ys;
-                        let pix_width = x_step.abs().round() as u16;
-                        let pix_height = y_step.abs().round() as u16;
+
+                        // FDN-992: the pixmap used to be sized straight from the
+                        // scaled step (`x_step.abs().round() as u16`), so the
+                        // common "tile once, never repeat" idiom (e.g. iText's
+                        // /XStep 99999 /YStep 99999) saturated the cast at
+                        // u16::MAX and allocated a 65535×65535×4 ≈ 16 GiB
+                        // pixmap for a cell whose content is bounded by
+                        // MAX_PIXMAP_SIZE. Decide per axis: a step within
+                        // `step_cap` keeps the legacy step-sized period pixmap
+                        // (bit-identical rendering); a step beyond it cannot
+                        // visibly repeat inside the render target, so the
+                        // pixmap stores just the padded cell and the paint
+                        // transform places the single lattice instance that
+                        // can intersect the painted area — the step no longer
+                        // dictates the allocation.
+                        let viewport_diag =
+                            f32::from(self.ctx.width()).hypot(f32::from(self.ctx.height()));
+                        let x_step_cap = MAX_PIXMAP_SIZE.max(viewport_diag + scaled_width + 2.0);
+                        let y_step_cap = MAX_PIXMAP_SIZE.max(viewport_diag + scaled_height + 2.0);
+                        let x_oversized = x_step.abs() > x_step_cap;
+                        let y_oversized = y_step.abs() > y_step_cap;
+
+                        // The painted area in pattern space, used to pick the
+                        // lattice instance for single-cell axes: device-space
+                        // path bounds (stroke-inflated like the shading arm),
+                        // clipped to the render target, pulled back through
+                        // the pattern matrix.
+                        let pattern_window = (x_oversized || y_oversized)
+                            .then(|| {
+                                let mut window =
+                                    (*path_transform * path.clone()).bounding_box();
+                                if is_stroke {
+                                    let (a1, a2) = x_y_advances(path_transform);
+                                    let factor =
+                                        a1.length().max(a2.length()) * self.ctx.stroke().width;
+                                    window = window.inflate(factor, factor);
+                                }
+                                let window = window.intersect(Rect::new(
+                                    0.0,
+                                    0.0,
+                                    self.ctx.width() as f64,
+                                    self.ctx.height() as f64,
+                                ));
+                                let det = t.matrix.determinant();
+                                (window.width() > 0.0
+                                    && window.height() > 0.0
+                                    && det.abs() > 1e-12)
+                                    .then(|| t.matrix.inverse().transform_rect_bbox(window))
+                            })
+                            .flatten();
+
+                        // `None` means several instances could intersect the
+                        // window (only reachable under extreme skew, since the
+                        // cap exceeds the viewport diagonal): that axis falls
+                        // back to a cap-sized repeating pixmap — bounded
+                        // memory, possibly early repetition — instead of the
+                        // saturated 65535 px one.
+                        let k_x = x_oversized
+                            .then(|| {
+                                single_cell_instance(
+                                    pattern_window.map(|w| (w.x0, w.x1)),
+                                    (bbox.x0, bbox.x1),
+                                    f64::from(t.x_step),
+                                )
+                            })
+                            .flatten();
+                        let k_y = y_oversized
+                            .then(|| {
+                                single_cell_instance(
+                                    pattern_window.map(|w| (w.y0, w.y1)),
+                                    (bbox.y0, bbox.y1),
+                                    f64::from(t.y_step),
+                                )
+                            })
+                            .flatten();
+                        let x_single_cell = x_oversized && k_x.is_some();
+                        let y_single_cell = y_oversized && k_y.is_some();
+
+                        // max() first: f32::max(NaN, 0.0) is 0.0, so a
+                        // degenerate bbox (NaN/negative sizes) collapses to an
+                        // empty pixmap instead of poisoning min() into 65535.
+                        let clamp_u16 = |v: f32| v.max(0.0).min(f32::from(u16::MAX)) as u16;
+                        let pix_width = if x_single_cell {
+                            clamp_u16((scaled_width + 2.0).ceil())
+                        } else if x_oversized {
+                            clamp_u16(x_step_cap.ceil())
+                        } else {
+                            x_step.abs().round() as u16
+                        };
+                        let pix_height = if y_single_cell {
+                            clamp_u16((scaled_height + 2.0).ceil())
+                        } else if y_oversized {
+                            clamp_u16(y_step_cap.ceil())
+                        } else {
+                            y_step.abs().round() as u16
+                        };
 
                         let mut renderer = Self {
                             ctx: RenderContext::new_with(
@@ -525,33 +619,88 @@ impl Renderer {
                             scaler: self.scaler,
                             image_transparency_stack: Vec::new(),
                         };
-                        let mut initial_transform = Affine::scale_non_uniform(xs as f64, ys as f64)
+
+                        // Single-cell axes shift the content by one pixel so a
+                        // transparent border survives on both sides: that
+                        // border is what Extend::Pad propagates outside the
+                        // cell. It must stay transparent, so clip the cell's
+                        // content to its scaled bbox (the spec-mandated /BBox
+                        // clip the legacy path delegated to the pixmap edge).
+                        let draw_offset = (
+                            if x_single_cell { 1.0 } else { 0.0 },
+                            if y_single_cell { 1.0 } else { 0.0 },
+                        );
+                        if x_single_cell || y_single_cell {
+                            let clip = Rect::new(
+                                if x_single_cell { draw_offset.0 } else { 0.0 },
+                                if y_single_cell { draw_offset.1 } else { 0.0 },
+                                if x_single_cell {
+                                    draw_offset.0 + scaled_width as f64
+                                } else {
+                                    pix_width as f64
+                                },
+                                if y_single_cell {
+                                    draw_offset.1 + scaled_height as f64
+                                } else {
+                                    pix_height as f64
+                                },
+                            );
+                            renderer.ctx.set_transform(Affine::IDENTITY);
+                            renderer.ctx.push_clip_path(&clip.to_path(0.1));
+                        }
+
+                        let draw_transform = Affine::translate(draw_offset)
+                            * Affine::scale_non_uniform(xs as f64, ys as f64)
                             * Affine::translate((-bbox.x0, -bbox.y0));
-                        t.interpret(&mut renderer, initial_transform, is_stroke);
+                        t.interpret(&mut renderer, draw_transform, is_stroke);
+                        if x_single_cell || y_single_cell {
+                            renderer.ctx.pop_clip_path();
+                        }
                         let mut pix = Pixmap::new(pix_width, pix_height);
                         renderer.ctx.flush();
                         let mut resources = vello_cpu::Resources::default();
                         renderer.ctx.render_to_pixmap(&mut resources, &mut pix);
 
-                        // TODO: Fix these
-                        if x_step < 0.0 {
-                            initial_transform *=
+                        // Placement: the draw transform shifted to lattice
+                        // instance (k_x, k_y); k is 0 on repeating axes, so
+                        // when both axes repeat this is exactly the legacy
+                        // transform.
+                        let mut place_transform = Affine::translate(draw_offset)
+                            * Affine::scale_non_uniform(xs as f64, ys as f64)
+                            * Affine::translate((
+                                -(bbox.x0 + k_x.unwrap_or(0.0) * f64::from(t.x_step)),
+                                -(bbox.y0 + k_y.unwrap_or(0.0) * f64::from(t.y_step)),
+                            ));
+
+                        // TODO: Fix these (legacy orientation fixups; only
+                        // meaningful on axes whose pixmap still encodes the
+                        // step period).
+                        if !x_single_cell && x_step < 0.0 {
+                            place_transform *=
                                 Affine::new([-1.0, 0.0, 0.0, 1.0, scaled_width as f64, 0.0]);
                         }
 
-                        if y_step < 0.0 {
-                            initial_transform *=
+                        if !y_single_cell && y_step < 0.0 {
+                            place_transform *=
                                 Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, scaled_height as f64]);
                         }
 
                         paint_transform =
-                            path_transform.inverse() * t.matrix * initial_transform.inverse();
+                            path_transform.inverse() * t.matrix * place_transform.inverse();
 
                         let image = Image {
                             image: ImageSource::Pixmap(Arc::new(pix)),
                             sampler: ImageSampler {
-                                x_extend: peniko::Extend::Repeat,
-                                y_extend: peniko::Extend::Repeat,
+                                x_extend: if x_single_cell {
+                                    peniko::Extend::Pad
+                                } else {
+                                    peniko::Extend::Repeat
+                                },
+                                y_extend: if y_single_cell {
+                                    peniko::Extend::Pad
+                                } else {
+                                    peniko::Extend::Repeat
+                                },
                                 quality: ImageQuality::Medium,
                                 alpha: 1.0,
                             },
@@ -1093,6 +1242,41 @@ pub(crate) fn max_factor(transform: &Affine) -> f32 {
         .to_vec2()
         .length()
         .max(y_advance.to_vec2().length()) as f32
+}
+
+/// For a tiling-pattern axis whose pixmap holds a single padded cell
+/// (FDN-992), pick the lattice instance `k` — the cell translated by
+/// `k * step` in pattern space — that can intersect the painted window.
+///
+/// Returns `None` when more than one instance could intersect, in which case
+/// the caller falls back to a bounded repeating pixmap for that axis. A
+/// window that intersects no instance returns the nearest candidate: every
+/// sample then lands in the transparent border, which is the correct
+/// "gap only" rendering.
+pub(crate) fn single_cell_instance(
+    window: Option<(f64, f64)>,
+    cell: (f64, f64),
+    step: f64,
+) -> Option<f64> {
+    if step == 0.0 || !step.is_finite() {
+        return Some(0.0);
+    }
+    let Some((w_lo, w_hi)) = window else {
+        // Unknown window (degenerate pattern matrix or empty painted area):
+        // nothing meaningful will be sampled; instance 0 preserves the legacy
+        // placement.
+        return Some(0.0);
+    };
+    let (a, b) = ((w_lo - cell.1) / step, (w_hi - cell.0) / step);
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let (k_lo, k_hi) = (lo.ceil(), hi.floor());
+    if !k_lo.is_finite() || !k_hi.is_finite() {
+        return Some(0.0);
+    }
+    if k_lo > k_hi {
+        return Some(k_lo);
+    }
+    (k_lo == k_hi).then_some(k_lo)
 }
 
 pub(crate) fn x_y_advances(transform: &Affine) -> (Vec2, Vec2) {

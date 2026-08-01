@@ -59,13 +59,16 @@ To use pdq as a library, add it to your project:
 cargo add pdq
 ```
 
-The prebuilt binaries and a source build carry two fixes to hayro's
-interpreter that are still making their way upstream: memoized tint
-transforms (much faster `render` on Separation/DeviceN images) and AGL-spec
-glyph-name mapping (fewer U+FFFD in `pdq text`). cargo drops patched
-dependencies when publishing, so a crates.io build runs without them —
-correct and complete, just slower on those images and slightly more likely to
-flag a page `degraded`. They land for everyone on the next hayro release.
+The prebuilt binaries and a source build carry three fixes to hayro that are
+still making their way upstream: memoized tint transforms (much faster
+`render` on Separation/DeviceN images), AGL-spec glyph-name mapping (fewer
+U+FFFD in `pdq text`), and bounded tiling-pattern rasterization (`vendor/hayro`;
+without it a pattern declaring a huge `/XStep`/`/YStep` — the iText
+"never repeat" idiom common in Brazilian signature-certificate pages — makes
+`render` attempt a single ~16 GiB allocation). cargo drops patched
+dependencies when publishing, so a crates.io build runs without them — the
+first two only cost speed/fidelity, but the tiling fix is load-bearing for
+`render` on such documents. They land for everyone on the next hayro release.
 
 ## Quick start
 
