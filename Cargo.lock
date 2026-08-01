@@ -690,8 +690,7 @@ dependencies = [
 [[package]]
 name = "hayro"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4caa128ab87fd48ffb7490617cf93f77f606820dffbc9fd9ef6ab0ed077f56d"
+source = "git+https://github.com/meistrari/hayro?rev=4aa5eec02ec4b48b66d929b337ce74676cdf7f6e#4aa5eec02ec4b48b66d929b337ce74676cdf7f6e"
 dependencies = [
  "bytemuck",
  "hayro-interpret",

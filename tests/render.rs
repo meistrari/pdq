@@ -205,6 +205,276 @@ fn deeply_nested_trailer_renders_instead_of_aborting() {
     assert!(width > 0 && height > 0);
 }
 
+// ---- Tiling-pattern memory-blowup regressions ------------------------------
+//
+// Real-world signature pages (iText 5.x, Brazilian PJe ecosystem) fill the
+// page with a tiling pattern declaring /XStep 99999 /YStep 99999: "paint the
+// cell once, never repeat". hayro sizes the tile pixmap from step × scale, so
+// before the clamp carried on our hayro fork this saturated the u16 cast at
+// 65535×65535 and attempted a ~16 GiB allocation. The fixtures below are
+// synthetic replicas of that structure; the tests assert both survival and
+// exact cell placement, so they fail if the clamp ever distorts phase or
+// spacing.
+
+fn build_pdf(bodies: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let start_xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+    );
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{start_xref}\n%%EOF\n",
+            bodies.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+fn stream_object(dict_entries: &str, content: &str) -> String {
+    format!(
+        "<< {dict_entries}/Length {} >>\nstream\n{content}\nendstream",
+        content.len()
+    )
+}
+
+/// A 200x200pt page whose content fills with a tiling pattern: a red 20x20pt
+/// cell spaced `step` points apart in both directions, placed by `matrix`.
+fn tiling_pattern_pdf_with_matrix(step: &str, matrix: &str, page_content: &str) -> Vec<u8> {
+    build_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+         /Resources << /Pattern << /P1 4 0 R >> >> /Contents 5 0 R >>"
+            .to_string(),
+        stream_object(
+            &format!(
+                "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 \
+                 /BBox [0 0 20 20] /XStep {step} /YStep {step} \
+                 /Matrix [{matrix}] /Resources << >> "
+            ),
+            "1 0 0 rg 0 0 20 20 re f",
+        ),
+        stream_object("", page_content),
+    ])
+}
+
+fn tiling_pattern_pdf(step: &str, page_content: &str) -> Vec<u8> {
+    tiling_pattern_pdf_with_matrix(step, "1 0 0 1 0 0", page_content)
+}
+
+/// The same pathological pattern, but painted from inside a Form XObject with
+/// a scaling and translating /Matrix. The pattern lives in the form's
+/// resources, so its cell must anchor to the form's space, not the page's.
+fn tiling_pattern_in_form_pdf() -> Vec<u8> {
+    build_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+         /Resources << /XObject << /Xf1 6 0 R >> >> /Contents 5 0 R >>"
+            .to_string(),
+        stream_object(
+            "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 \
+             /BBox [0 0 20 20] /XStep 99999 /YStep 99999 /Resources << >> ",
+            "1 0 0 rg 0 0 20 20 re f",
+        ),
+        stream_object("", "/Xf1 Do"),
+        stream_object(
+            "/Type /XObject /Subtype /Form /BBox [0 0 100 100] \
+             /Matrix [2 0 0 2 30 40] /Resources << /Pattern << /P1 4 0 R >> >> ",
+            "/Pattern cs /P1 scn 0 0 100 100 re f",
+        ),
+    ])
+}
+
+fn render_first_page(pdf_bytes: Vec<u8>, scale: f32) -> hayro::vello_cpu::Pixmap {
+    use hayro::{
+        hayro_interpret::InterpreterSettings, hayro_syntax::Pdf, RenderCache, RenderSettings,
+    };
+
+    let Ok(pdf) = Pdf::new(pdf_bytes) else {
+        panic!("fixture should parse");
+    };
+    let settings = RenderSettings {
+        x_scale: scale,
+        y_scale: scale,
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+        ..Default::default()
+    };
+    hayro::render(
+        &pdf.pages()[0],
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &settings,
+    )
+}
+
+fn pixel_at(pixmap: &hayro::vello_cpu::Pixmap, x: u32, y: u32) -> [u8; 4] {
+    let index = ((y * u32::from(pixmap.width()) + x) * 4) as usize;
+    pixmap.data_as_u8_slice()[index..index + 4]
+        .try_into()
+        .unwrap()
+}
+
+#[track_caller]
+fn assert_red(pixmap: &hayro::vello_cpu::Pixmap, x: u32, y: u32) {
+    let [r, g, b, _] = pixel_at(pixmap, x, y);
+    assert!(
+        r >= 240 && g <= 15 && b <= 15,
+        "expected red at ({x},{y}), got ({r},{g},{b})"
+    );
+}
+
+#[track_caller]
+fn assert_white(pixmap: &hayro::vello_cpu::Pixmap, x: u32, y: u32) {
+    let [r, g, b, _] = pixel_at(pixmap, x, y);
+    assert!(
+        r >= 240 && g >= 240 && b >= 240,
+        "expected white at ({x},{y}), got ({r},{g},{b})"
+    );
+}
+
+/// Before the clamp, this attempted the 16 GiB tile pixmap and aborted the
+/// process; it must now complete and place the single cell at the pattern
+/// origin. PDF origin is bottom-left, pixmap rows are top-down, so at
+/// 144 dpi (scale 2.0) point (x, y) maps to pixel (2x, 400 - 2y).
+#[test]
+fn huge_step_tiling_pattern_renders_single_cell() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("tiling-huge-step.pdf");
+    let bytes = tiling_pattern_pdf("99999", "/Pattern cs /P1 scn 0 0 200 200 re f");
+    std::fs::write(&input, &bytes).unwrap();
+
+    let pattern = temp.path().join("tile-%d.png");
+    render_pages(
+        &input,
+        pattern.to_str().unwrap(),
+        &RenderOptions {
+            dpi: 144.0,
+            pages: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(png_dimensions(&temp.path().join("tile-1.png")), (400, 400));
+
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 20, 380); // (10,10)pt: inside the cell at the origin
+    assert_white(&pixmap, 120, 280); // (60,60)pt: red if the period collapsed to the cell
+    assert_white(&pixmap, 300, 100); // (150,150)pt: red if the pattern repeated
+}
+
+/// The CTM at fill time differs from the pattern's anchor space (the page
+/// root), so this fails if the clamp maps the visible window through the
+/// path transform instead of the pattern matrix.
+#[test]
+fn huge_step_tiling_pattern_phase_survives_ctm_translation() {
+    let bytes = tiling_pattern_pdf(
+        "99999",
+        "q 1 0 0 1 40 30 cm /Pattern cs /P1 scn -40 -30 200 200 re f Q",
+    );
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 20, 380); // cell must stay anchored to the page origin
+    assert_white(&pixmap, 120, 280);
+    assert_white(&pixmap, 300, 100);
+}
+
+/// Patterns used inside a form anchor to the form's space: the cell is 20pt
+/// scaled by the form's /Matrix [2 0 0 2 30 40], landing on page points
+/// (30..70, 40..80).
+#[test]
+fn huge_step_tiling_pattern_anchors_to_transformed_form() {
+    let pixmap = render_first_page(tiling_pattern_in_form_pdf(), 2.0);
+    assert_red(&pixmap, 100, 280); // (50,60)pt: inside the transformed cell
+    assert_white(&pixmap, 20, 380); // (10,10)pt: red if anchored to the page
+    assert_white(&pixmap, 240, 160); // (120,120)pt: inside the form, past the cell
+}
+
+/// The pattern matrix pushes the base cell one full period below and left of
+/// the page, so the cell visible at the page origin is lattice instance
+/// (1,1). The 5000pt period also overflows the total-area budget, so this
+/// exercises the downsampling path: lattice phase must survive with only
+/// sampling density reduced (the cell still spans 3000 * 20/5000 = 12px in
+/// the tile pixmap, solid at its center).
+#[test]
+fn displaced_pattern_matrix_keeps_lattice_phase() {
+    let bytes = tiling_pattern_pdf_with_matrix(
+        "5000",
+        "1 0 0 1 -5000 -5000",
+        "/Pattern cs /P1 scn 0 0 200 200 re f",
+    );
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 20, 380); // (10,10)pt: instance (1,1) lands on the origin
+    assert_white(&pixmap, 120, 280); // (60,60)pt: gap
+    assert_white(&pixmap, 300, 100); // (150,150)pt: gap
+}
+
+/// The filled region lies entirely inside the empty spacing between cells:
+/// nothing may be painted there, and the tile pixmap must shrink to the
+/// window instead of covering the full period.
+#[test]
+fn huge_step_pattern_window_inside_gap_stays_empty() {
+    let bytes = tiling_pattern_pdf("99999", "/Pattern cs /P1 scn 50 50 140 140 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_white(&pixmap, 110, 290); // (55,55)pt: near the fill's lower-left corner
+    assert_white(&pixmap, 120, 280); // (60,60)pt: inside the filled region
+    assert_white(&pixmap, 200, 200); // (100,100)pt: center of the filled region
+    assert_white(&pixmap, 20, 380); // (10,10)pt: the cell area is outside the fill
+}
+
+/// Negative steps keep a 50pt lattice, but hayro's mirror handling (an
+/// upstream `TODO: Fix these`) anchors the cells one cell size off the
+/// origin. The clamp is symmetric in |step| and must not alter that:
+/// this render is pixel-identical to the unpatched renderer, and the
+/// assertions lock the observed lattice (cells at (20..40)pt + k*50pt in x,
+/// mirrored likewise in y) rather than the spec-ideal anchor.
+#[test]
+fn negative_step_tiling_is_unchanged_by_the_clamp() {
+    let bytes = tiling_pattern_pdf("-50", "/Pattern cs /P1 scn 0 0 200 200 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 60, 40); // first cell of the mirrored lattice
+    assert_red(&pixmap, 160, 40); // second column, 50pt to the right
+    assert_red(&pixmap, 60, 140); // second row, 50pt down
+    assert_white(&pixmap, 110, 40); // gap between columns
+    assert_white(&pixmap, 60, 100); // gap between rows
+}
+
+/// A negative huge step is still "paint the cell once". Before the clamp
+/// this attempted the same 16 GiB pixmap as the positive case (|step|
+/// saturates identically; the unpatched renderer is OOM-killed on this
+/// fixture); now it must complete with a single cell, anchored by the same
+/// mirror convention as the finite negative step above.
+#[test]
+fn negative_huge_step_tiling_draws_single_cell() {
+    let bytes = tiling_pattern_pdf("-99999", "/Pattern cs /P1 scn 0 0 200 200 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 60, 340); // the only visible cell, mirror-anchored
+    assert_white(&pixmap, 160, 340); // no second column
+    assert_white(&pixmap, 60, 200); // no second row
+    assert_white(&pixmap, 300, 100); // far field stays empty
+}
+
+/// A tame step must keep tiling exactly as before the clamp: cells every
+/// 50pt starting at the origin.
+#[test]
+fn tiling_pattern_normal_spacing_is_preserved() {
+    let bytes = tiling_pattern_pdf("50", "/Pattern cs /P1 scn 0 0 200 200 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 20, 380); // (10,10)pt: first cell
+    assert_red(&pixmap, 120, 380); // (60,10)pt: second column
+    assert_red(&pixmap, 220, 180); // (110,110)pt: third row and column
+    assert_white(&pixmap, 70, 380); // (35,10)pt: gap between columns
+    assert_white(&pixmap, 20, 330); // (10,35)pt: gap between rows
+}
+
 #[test]
 fn render_cli_writes_selected_page() {
     let temp = tempdir().unwrap();

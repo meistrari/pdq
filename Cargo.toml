@@ -45,3 +45,12 @@ tempfile = "3.23.0"
 # (based on hayro-interpret-v0.7.0).
 [patch.crates-io]
 hayro-interpret = { git = "https://github.com/Guiqft/hayro", branch = "agl-glyph-names-0.7" }
+# Carry a patched hayro until the tiling-pattern fix lands upstream (issue
+# LaurenzV/hayro#404): the tile pixmap was sized from XStep/YStep alone, so
+# the /XStep 99999 used by iText signature pages saturated the u16 cast at
+# 65535x65535 and attempted a ~16 GiB allocation (FDN-992). Branch
+# tiling-period-clamp-0.7 = the hayro 0.7.1 publish commit + a clamp of the
+# tile period to the visible area plus a total-area budget, with
+# hayro-interpret resolved through crates.io so the entry above keeps
+# providing the AGL and tint-transform fixes.
+hayro = { git = "https://github.com/meistrari/hayro", rev = "4aa5eec02ec4b48b66d929b337ce74676cdf7f6e" }
