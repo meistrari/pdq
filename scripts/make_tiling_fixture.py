@@ -27,6 +27,15 @@ blur from downscaling the cell):
   page 4  XStep/YStep -99999, identity matrix — the lattice is the same
           set as page 1's, must render exactly like page 1
 
+Pages 5–6 exercise the MIXED per-axis decision (Pad × Repeat) with a
+band-shaped cell (BBox 300×100, teal/orange halves + hairline at y = 49):
+
+  page 5  XStep 99999 (oversized → single cell, Pad), YStep 100
+          (normal → contiguous repeat): horizontal bands stack up the
+          page while everything right of x = 300 stays blank
+  page 6  same, /Matrix translate(-99999, 0): x sits on lattice
+          instance 1 — must render exactly like page 5
+
 All streams are stored uncompressed so the fixture is reviewable as text.
 """
 
@@ -50,17 +59,27 @@ PAGE_CONTENT = b"""q
 Q
 """
 
+# Band cell for the mixed-axis pages: 300×100, teal left half, orange right
+# half, black hairline at y = 49.
+BAND_CELL = b"""0 0.5 0.5 rg
+0 0 150 100 re f
+1 0.5 0 rg
+150 0 150 100 re f
+0 0 0 rg
+0 49 300 1.5 re f
+"""
 
-def pattern(cell_ref: int, x_step: str, y_step: str, matrix: str) -> bytes:
+
+def pattern(cell: bytes, bbox: str, x_step: str, y_step: str, matrix: str) -> bytes:
     # /Resources of the pattern itself is empty: the cell only paints
     # device-color rects.
     return (
         b"<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2"
-        b" /BBox [0 0 595 842]"
+        b" /BBox [" + bbox.encode() + b"]"
         b" /XStep " + x_step.encode() + b" /YStep " + y_step.encode() +
         b" /Matrix [" + matrix.encode() + b"]"
         b" /Resources << /ProcSet [/PDF] >>"
-        b" /Length " + str(len(CELL)).encode() + b" >>\nstream\n" + CELL + b"endstream"
+        b" /Length " + str(len(cell)).encode() + b" >>\nstream\n" + cell + b"endstream"
     )
 
 
@@ -80,18 +99,27 @@ def page(parent: int, contents: int, pat: int) -> bytes:
 
 
 def build() -> bytes:
+    page_bbox = "0 0 595 842"
+    band_bbox = "0 0 300 100"
     objs: dict[int, bytes] = {}
     objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
-    objs[2] = b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 >>"
+    objs[2] = (
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 12 0 R 13 0 R]"
+        b" /Count 6 >>"
+    )
     objs[7] = stream_obj(PAGE_CONTENT)
-    objs[8] = pattern(7, "99999", "99999", "1 0 0 1 0 0")
-    objs[9] = pattern(7, "99999", "99999", "1 0 0 1 -99999 -99999")
-    objs[10] = pattern(7, "99999", "99999", "1 0 0 1 -50000 0")
-    objs[11] = pattern(7, "-99999", "-99999", "1 0 0 1 0 0")
+    objs[8] = pattern(CELL, page_bbox, "99999", "99999", "1 0 0 1 0 0")
+    objs[9] = pattern(CELL, page_bbox, "99999", "99999", "1 0 0 1 -99999 -99999")
+    objs[10] = pattern(CELL, page_bbox, "99999", "99999", "1 0 0 1 -50000 0")
+    objs[11] = pattern(CELL, page_bbox, "-99999", "-99999", "1 0 0 1 0 0")
     objs[3] = page(2, 7, 8)
     objs[4] = page(2, 7, 9)
     objs[5] = page(2, 7, 10)
     objs[6] = page(2, 7, 11)
+    objs[14] = pattern(BAND_CELL, band_bbox, "99999", "100", "1 0 0 1 0 0")
+    objs[15] = pattern(BAND_CELL, band_bbox, "99999", "100", "1 0 0 1 -99999 0")
+    objs[12] = page(2, 7, 14)
+    objs[13] = page(2, 7, 15)
 
     out = bytearray(b"%PDF-1.7\n")
     offsets: dict[int, int] = {}

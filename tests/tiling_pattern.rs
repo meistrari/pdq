@@ -27,6 +27,31 @@ use hayro::{
 const DPI_144_SCALE: f32 = 144.0 / 72.0;
 const PAGE_HEIGHT_PT: f32 = 842.0;
 
+/// Whether these tests are running against an unpacked crates.io release
+/// rather than a checkout of the repository (same convention as
+/// tests/text.rs). It matters here because cargo drops both the
+/// `[patch.crates-io]` table and `vendor/` when packaging, so the published
+/// crate builds against the unpatched hayro — where every test below would
+/// re-trigger the FDN-992 ~16 GiB allocation instead of merely failing.
+/// `hayro` is deliberately NOT in .github/publish-patch-allowlist.txt: the
+/// release gate blocks publishing until the fix ships upstream.
+fn is_packaged_crate() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("Cargo.toml.orig")
+        .exists()
+}
+
+/// Explicit, loud skip for the packaged crate; a normal git checkout never
+/// takes this path.
+macro_rules! skip_on_packaged_crate {
+    () => {
+        if is_packaged_crate() {
+            eprintln!("skipping: the published crate builds without the vendored hayro fix");
+            return;
+        }
+    };
+}
+
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -79,6 +104,7 @@ fn assert_same_pixels(a: &[u8], b: &[u8], what: &str) {
 
 #[test]
 fn huge_step_pattern_renders_cell_content() {
+    skip_on_packaged_crate!();
     let (data, width, height) = render_page(0, DPI_144_SCALE);
     assert_eq!((width, height), (1190, 1684));
 
@@ -113,6 +139,7 @@ fn huge_step_pattern_renders_cell_content() {
 
 #[test]
 fn phase_shifted_pattern_matches_baseline() {
+    skip_on_packaged_crate!();
     // Page 2 translates the pattern by (-99999, -99999): the page sits on
     // lattice instance (1, 1) instead of (0, 0). Placement must follow the
     // lattice, so the output is identical to page 1.
@@ -123,6 +150,7 @@ fn phase_shifted_pattern_matches_baseline() {
 
 #[test]
 fn gap_window_renders_blank() {
+    skip_on_packaged_crate!();
     // Page 3 translates the pattern by (-50000, 0): the page falls in the gap
     // between instance 0 and instance 1, where nothing may be painted.
     let (data, ..) = render_page(2, DPI_144_SCALE);
@@ -134,6 +162,7 @@ fn gap_window_renders_blank() {
 
 #[test]
 fn negative_steps_match_baseline() {
+    skip_on_packaged_crate!();
     // Page 4 uses XStep/YStep -99999: the lattice {k·step} is the same set as
     // page 1's, and hayro's convention (unlike MuPDF, which renders nothing
     // for negative steps) is to paint it. This pins internal consistency with
@@ -145,6 +174,7 @@ fn negative_steps_match_baseline() {
 
 #[test]
 fn oversized_viewport_has_no_ghost_repetition() {
+    skip_on_packaged_crate!();
     // At 400 dpi the page raster is 3305×4677 px — beyond hayro's 3000 px
     // MAX_PIXMAP_SIZE in both axes. A fix that merely clamped the period
     // pixmap to 3000 px would tile the cell content again past device
@@ -182,4 +212,70 @@ fn oversized_viewport_has_no_ghost_repetition() {
         [0, 0, 0],
         "hairline stays sharp",
     );
+}
+
+#[test]
+fn mixed_axes_pad_x_repeat_y() {
+    skip_on_packaged_crate!();
+    // Page 5 mixes the per-axis decisions: XStep 99999 on a 300 pt-wide cell
+    // (oversized → single cell, Extend::Pad) with YStep 100 on a 100 pt-tall
+    // cell (normal → legacy step pixmap, Extend::Repeat). The result is a
+    // stack of teal/orange bands with a hairline at y = 49 + 100k, repeating
+    // up the whole page, while everything right of x = 300 stays blank —
+    // repetition on y proves Repeat survived, the blank right side proves Pad
+    // pads with transparency. Matches MuPDF within 1/255 at 144 dpi.
+    let (data, width, height) = render_page(4, DPI_144_SCALE);
+    assert_eq!((width, height), (1190, 1684));
+
+    let s = DPI_144_SCALE;
+    // Mid-band samples (y = 25/75 + 100k avoids the hairline at [49, 50.5]).
+    assert_rgb(
+        sample(&data, width, 75.0, 25.0, s),
+        [0, 128, 128],
+        "teal, band 0",
+    );
+    assert_rgb(
+        sample(&data, width, 75.0, 425.0, s),
+        [0, 128, 128],
+        "teal, band 4",
+    );
+    assert_rgb(
+        sample(&data, width, 225.0, 75.0, s),
+        [255, 128, 0],
+        "orange, band 0",
+    );
+    assert_rgb(
+        sample(&data, width, 225.0, 725.0, s),
+        [255, 128, 0],
+        "orange, band 7",
+    );
+    assert_rgb(
+        sample(&data, width, 100.0, 49.75, s),
+        [0, 0, 0],
+        "hairline, band 0",
+    );
+    assert_rgb(
+        sample(&data, width, 100.0, 449.75, s),
+        [0, 0, 0],
+        "hairline, band 4",
+    );
+    // Right of the 300 pt cell: the x axis must pad, never repeat.
+    for y in [50.0, 421.0, 800.0] {
+        assert_rgb(
+            sample(&data, width, 450.0, y, s),
+            [255, 255, 255],
+            "pad region right of the cell",
+        );
+    }
+}
+
+#[test]
+fn mixed_axes_phase_matches_baseline() {
+    skip_on_packaged_crate!();
+    // Page 6 is page 5 with /Matrix translate(-99999, 0): the visible window
+    // sits on x lattice instance 1 while y keeps repeating — placement on the
+    // padded axis must follow the lattice exactly as in the both-axes case.
+    let (base, ..) = render_page(4, DPI_144_SCALE);
+    let (shifted, ..) = render_page(5, DPI_144_SCALE);
+    assert_same_pixels(&base, &shifted, "mixed-axes x instance 1 placement");
 }

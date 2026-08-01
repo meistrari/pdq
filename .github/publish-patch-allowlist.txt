@@ -25,3 +25,17 @@
 # Both degrade gracefully, so the published crate is correct without them.
 # The release binaries are built from this repo and do carry them.
 hayro-interpret
+
+# hayro (vendored at vendor/hayro, FDN-992) is INTENTIONALLY NOT listed.
+# Its patch bounds tiling-pattern rasterization: without it, `pdq render`
+# attempts a single ~16 GiB allocation on the iText "never repeat" idiom
+# (/XStep 99999 /YStep 99999, standard in Brazilian signature-certificate
+# pages) — an availability loss, exactly what this gate exists to block.
+# A tag / crates.io release must therefore stay blocked (this check fails
+# on purpose) until the fix ships in an official hayro release and both
+# vendor/hayro and its [patch.crates-io] entry are dropped. Deploys that
+# build from this repo (e.g. the Document API's PDQ_REF) are unaffected.
+# tests/tiling_pattern.rs and tests/tiling_pattern_alloc.rs skip
+# themselves inside a packaged crate (see their is_packaged_crate) so the
+# published suite would stay green — running them against the unpatched
+# hayro would re-trigger the giant allocation, not merely fail.

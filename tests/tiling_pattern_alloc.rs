@@ -56,8 +56,25 @@ static ALLOC: CountingAlloc = CountingAlloc;
 
 const MIB: usize = 1024 * 1024;
 
+/// Whether this test runs against an unpacked crates.io release rather than
+/// a checkout (same convention as tests/text.rs). The published crate loses
+/// both `[patch.crates-io]` and `vendor/`, so it builds against the
+/// unpatched hayro — where this test would not fail an assertion but
+/// re-trigger the FDN-992 ~16 GiB allocation itself. `hayro` is
+/// deliberately NOT in .github/publish-patch-allowlist.txt: the release
+/// gate blocks publishing until the fix ships upstream.
+fn is_packaged_crate() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("Cargo.toml.orig")
+        .exists()
+}
+
 #[test]
 fn huge_step_pattern_render_stays_within_memory_budget() {
+    if is_packaged_crate() {
+        eprintln!("skipping: the published crate builds without the vendored hayro fix");
+        return;
+    }
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
