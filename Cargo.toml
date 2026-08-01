@@ -43,5 +43,13 @@ tempfile = "3.23.0"
 #   None, so `pdq text` flagged recoverable glyphs as degraded U+FFFD.
 # Fork branch: agl-glyph-names-0.7 = tint-transform-lut-0.7 + the AGL fix
 # (based on hayro-interpret-v0.7.0).
+#
+# hayro (the renderer crate) is vendored at vendor/hayro: crates.io 0.7.1
+# verbatim plus the FDN-992 tiling-pattern fix (a pattern with a huge
+# /XStep//YStep sized its tile pixmap from the step — 65535×65535 px ≈ 16 GiB
+# for the iText "never repeat" idiom of XStep 99999). Vendored as a path patch
+# because the fix must ship without publishing to any external repository;
+# drop the vendor once the fix lands upstream (LaurenzV/hayro).
 [patch.crates-io]
 hayro-interpret = { git = "https://github.com/Guiqft/hayro", branch = "agl-glyph-names-0.7" }
+hayro = { path = "vendor/hayro" }
