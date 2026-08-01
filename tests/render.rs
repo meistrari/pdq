@@ -248,8 +248,8 @@ fn stream_object(dict_entries: &str, content: &str) -> String {
 }
 
 /// A 200x200pt page whose content fills with a tiling pattern: a red 20x20pt
-/// cell spaced `step` points apart in both directions.
-fn tiling_pattern_pdf(step: &str, page_content: &str) -> Vec<u8> {
+/// cell spaced `step` points apart in both directions, placed by `matrix`.
+fn tiling_pattern_pdf_with_matrix(step: &str, matrix: &str, page_content: &str) -> Vec<u8> {
     build_pdf(&[
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
@@ -259,12 +259,17 @@ fn tiling_pattern_pdf(step: &str, page_content: &str) -> Vec<u8> {
         stream_object(
             &format!(
                 "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 2 \
-                 /BBox [0 0 20 20] /XStep {step} /YStep {step} /Resources << >> "
+                 /BBox [0 0 20 20] /XStep {step} /YStep {step} \
+                 /Matrix [{matrix}] /Resources << >> "
             ),
             "1 0 0 rg 0 0 20 20 re f",
         ),
         stream_object("", page_content),
     ])
+}
+
+fn tiling_pattern_pdf(step: &str, page_content: &str) -> Vec<u8> {
+    tiling_pattern_pdf_with_matrix(step, "1 0 0 1 0 0", page_content)
 }
 
 /// The same pathological pattern, but painted from inside a Form XObject with
@@ -391,6 +396,70 @@ fn huge_step_tiling_pattern_anchors_to_transformed_form() {
     assert_red(&pixmap, 100, 280); // (50,60)pt: inside the transformed cell
     assert_white(&pixmap, 20, 380); // (10,10)pt: red if anchored to the page
     assert_white(&pixmap, 240, 160); // (120,120)pt: inside the form, past the cell
+}
+
+/// The pattern matrix pushes the base cell one full period below and left of
+/// the page, so the cell visible at the page origin is lattice instance
+/// (1,1). The 5000pt period also overflows the total-area budget, so this
+/// exercises the downsampling path: lattice phase must survive with only
+/// sampling density reduced (the cell still spans 3000 * 20/5000 = 12px in
+/// the tile pixmap, solid at its center).
+#[test]
+fn displaced_pattern_matrix_keeps_lattice_phase() {
+    let bytes = tiling_pattern_pdf_with_matrix(
+        "5000",
+        "1 0 0 1 -5000 -5000",
+        "/Pattern cs /P1 scn 0 0 200 200 re f",
+    );
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 20, 380); // (10,10)pt: instance (1,1) lands on the origin
+    assert_white(&pixmap, 120, 280); // (60,60)pt: gap
+    assert_white(&pixmap, 300, 100); // (150,150)pt: gap
+}
+
+/// The filled region lies entirely inside the empty spacing between cells:
+/// nothing may be painted there, and the tile pixmap must shrink to the
+/// window instead of covering the full period.
+#[test]
+fn huge_step_pattern_window_inside_gap_stays_empty() {
+    let bytes = tiling_pattern_pdf("99999", "/Pattern cs /P1 scn 50 50 140 140 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_white(&pixmap, 110, 290); // (55,55)pt: near the fill's lower-left corner
+    assert_white(&pixmap, 120, 280); // (60,60)pt: inside the filled region
+    assert_white(&pixmap, 200, 200); // (100,100)pt: center of the filled region
+    assert_white(&pixmap, 20, 380); // (10,10)pt: the cell area is outside the fill
+}
+
+/// Negative steps keep a 50pt lattice, but hayro's mirror handling (an
+/// upstream `TODO: Fix these`) anchors the cells one cell size off the
+/// origin. The clamp is symmetric in |step| and must not alter that:
+/// this render is pixel-identical to the unpatched renderer, and the
+/// assertions lock the observed lattice (cells at (20..40)pt + k*50pt in x,
+/// mirrored likewise in y) rather than the spec-ideal anchor.
+#[test]
+fn negative_step_tiling_is_unchanged_by_the_clamp() {
+    let bytes = tiling_pattern_pdf("-50", "/Pattern cs /P1 scn 0 0 200 200 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 60, 40); // first cell of the mirrored lattice
+    assert_red(&pixmap, 160, 40); // second column, 50pt to the right
+    assert_red(&pixmap, 60, 140); // second row, 50pt down
+    assert_white(&pixmap, 110, 40); // gap between columns
+    assert_white(&pixmap, 60, 100); // gap between rows
+}
+
+/// A negative huge step is still "paint the cell once". Before the clamp
+/// this attempted the same 16 GiB pixmap as the positive case (|step|
+/// saturates identically; the unpatched renderer is OOM-killed on this
+/// fixture); now it must complete with a single cell, anchored by the same
+/// mirror convention as the finite negative step above.
+#[test]
+fn negative_huge_step_tiling_draws_single_cell() {
+    let bytes = tiling_pattern_pdf("-99999", "/Pattern cs /P1 scn 0 0 200 200 re f");
+    let pixmap = render_first_page(bytes, 2.0);
+    assert_red(&pixmap, 60, 340); // the only visible cell, mirror-anchored
+    assert_white(&pixmap, 160, 340); // no second column
+    assert_white(&pixmap, 60, 200); // no second row
+    assert_white(&pixmap, 300, 100); // far field stays empty
 }
 
 /// A tame step must keep tiling exactly as before the clamp: cells every
