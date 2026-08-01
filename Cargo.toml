@@ -53,4 +53,4 @@ hayro-interpret = { git = "https://github.com/Guiqft/hayro", branch = "agl-glyph
 # tile period to the visible area plus a total-area budget, with
 # hayro-interpret resolved through crates.io so the entry above keeps
 # providing the AGL and tint-transform fixes.
-hayro = { git = "https://github.com/henrycunh/hayro", rev = "4aa5eec02ec4b48b66d929b337ce74676cdf7f6e" }
+hayro = { git = "https://github.com/meistrari/hayro", rev = "4aa5eec02ec4b48b66d929b337ce74676cdf7f6e" }
