@@ -30,6 +30,9 @@ const NORMAL_CACHE_SHARD_LIMIT: usize = 512;
 /// dominates a fresh parse — so caching gains nothing while big page-unique
 /// content streams would evict the small shared dictionaries the cache is for.
 const NORMAL_CACHE_MAX_STREAM_BYTES: usize = 8 * 1024;
+/// Maximum number of indirect objects followed while resolving a page-tree
+/// `/Kids` value. Matches the page-tree traversal depth cap.
+const MAX_PAGE_TREE_REFERENCE_CHAIN: usize = 256;
 
 /// A parsed PDF input: lazily backed by the mmap for plain files, eagerly
 /// loaded for encrypted files.
@@ -389,7 +392,7 @@ impl<'a> LazyPdf<'a> {
             let object = objects
                 .get(&(id.0, 0))
                 .ok_or(PdfOpsError::Pdf(lopdf::Error::ObjectNotFound(id)))?;
-            return classify_page_dict(object);
+            return classify_page_dict(self, object);
         }
 
         let mut already_seen = HashSet::new();
@@ -397,7 +400,7 @@ impl<'a> LazyPdf<'a> {
             .reader
             .get_object(id, &mut already_seen)
             .map_err(|err| PdfOpsError::Pdf(normalize_missing_xref(err, id)))?;
-        classify_page_dict(&object)
+        classify_page_dict(self, &object)
     }
 
     fn get_owned(&self, id: ObjectId) -> Result<Object> {
@@ -481,39 +484,98 @@ enum PageNode {
     Other,
 }
 
-fn classify_page_dict(object: &Object) -> Result<PageNode> {
+fn classify_page_dict(source: &impl ObjectSource, object: &Object) -> Result<PageNode> {
     let dict = object
         .as_dict()
         .map_err(|_| PdfOpsError::InvalidStructure("page tree node is not a dictionary".into()))?;
     match dict.get_type().map_err(PdfOpsError::Pdf)? {
         b"Page" => Ok(PageNode::Leaf),
         b"Pages" => {
-            let kids = dict
-                .get(b"Kids")
-                .and_then(Object::as_array)
-                .map_err(PdfOpsError::Pdf)?;
-            let mut kid_ids = Vec::with_capacity(kids.len());
-            for kid in kids {
-                match kid {
-                    Object::Reference(kid_id) => kid_ids.push(*kid_id),
-                    // A direct page dict has no object id, so split could
-                    // never copy it; refuse loudly instead of silently
-                    // under-counting (qpdf-qtest 0213).
-                    Object::Dictionary(_) => {
-                        return Err(PdfOpsError::InvalidStructure(
-                            "page tree kid is a direct object; pages must be \
-                             indirect references"
-                                .into(),
-                        ));
-                    }
-                    // tolerate nulls and other junk in Kids arrays
-                    _ => {}
-                }
-            }
-            Ok(PageNode::Interior(kid_ids))
+            let kids = dict.get(b"Kids").map_err(|_| {
+                PdfOpsError::InvalidStructure("page tree node is missing /Kids".into())
+            })?;
+            Ok(PageNode::Interior(page_tree_kid_ids(source, kids)?))
         }
         _ => Ok(PageNode::Other),
     }
+}
+
+fn page_tree_kid_ids(source: &impl ObjectSource, kids: &Object) -> Result<Vec<ObjectId>> {
+    let resolved;
+    let kids = match kids {
+        Object::Array(kids) => kids,
+        Object::Reference(id) => {
+            resolved = resolve_page_tree_reference(source, *id)?;
+            match &resolved {
+                Object::Array(kids) => kids,
+                other => {
+                    return Err(PdfOpsError::InvalidStructure(format!(
+                        "page tree /Kids must resolve to an array, found {}",
+                        other.enum_variant()
+                    )));
+                }
+            }
+        }
+        other => {
+            return Err(PdfOpsError::InvalidStructure(format!(
+                "page tree /Kids must resolve to an array, found {}",
+                other.enum_variant()
+            )));
+        }
+    };
+
+    let mut kid_ids = Vec::with_capacity(kids.len());
+    for kid in kids {
+        match kid {
+            Object::Reference(kid_id) => kid_ids.push(*kid_id),
+            // A direct page dict has no object id, so split could
+            // never copy it; refuse loudly instead of silently
+            // under-counting (qpdf-qtest 0213).
+            Object::Dictionary(_) => {
+                return Err(PdfOpsError::InvalidStructure(
+                    "page tree kid is a direct object; pages must be \
+                     indirect references"
+                        .into(),
+                ));
+            }
+            // tolerate nulls and other junk in Kids arrays
+            _ => {}
+        }
+    }
+    Ok(kid_ids)
+}
+
+fn resolve_page_tree_reference(source: &impl ObjectSource, mut id: ObjectId) -> Result<Object> {
+    let mut seen = HashSet::new();
+    for _ in 0..MAX_PAGE_TREE_REFERENCE_CHAIN {
+        if !seen.insert(id) {
+            return Err(PdfOpsError::InvalidStructure(format!(
+                "cycle detected resolving page tree /Kids references at {} {} R",
+                id.0, id.1
+            )));
+        }
+
+        let object = source
+            .get_object_value(id)
+            .map(Cow::into_owned)
+            .map_err(|err| match err {
+                lopdf::Error::ObjectNotFound(_) | lopdf::Error::MissingXrefEntry => {
+                    PdfOpsError::InvalidStructure(format!(
+                        "page tree /Kids reference {} {} R points to a missing object",
+                        id.0, id.1
+                    ))
+                }
+                other => PdfOpsError::Pdf(other),
+            })?;
+        match object {
+            Object::Reference(next) => id = next,
+            direct => return Ok(direct),
+        }
+    }
+
+    Err(PdfOpsError::InvalidStructure(
+        "page tree /Kids reference chain exceeds maximum depth".into(),
+    ))
 }
 
 fn drop_object(_: ObjectId, _: &mut Object) -> Option<(ObjectId, Object)> {
@@ -641,12 +703,39 @@ impl ObjectStreamCache {
 
 #[cfg(test)]
 mod tests {
-    use lopdf::{Object, Stream};
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    use lopdf::{Object, ObjectId, Stream};
+
+    use crate::{copy::ObjectSource, PdfOpsError};
 
     use super::{
-        cacheable_normal_object, Arc, NormalObjectCache, NORMAL_CACHE_MAX_STREAM_BYTES,
-        NORMAL_CACHE_SHARDS, NORMAL_CACHE_SHARD_LIMIT,
+        cacheable_normal_object, page_tree_kid_ids, Arc, NormalObjectCache,
+        MAX_PAGE_TREE_REFERENCE_CHAIN, NORMAL_CACHE_MAX_STREAM_BYTES, NORMAL_CACHE_SHARDS,
+        NORMAL_CACHE_SHARD_LIMIT,
     };
+
+    #[derive(Default)]
+    struct TestObjectSource(BTreeMap<ObjectId, Object>);
+
+    impl ObjectSource for TestObjectSource {
+        fn get_object_value(
+            &self,
+            id: ObjectId,
+        ) -> std::result::Result<Cow<'_, Object>, lopdf::Error> {
+            self.0
+                .get(&id)
+                .map(Cow::Borrowed)
+                .ok_or(lopdf::Error::ObjectNotFound(id))
+        }
+    }
+
+    fn invalid_structure_message(error: PdfOpsError) -> String {
+        match error {
+            PdfOpsError::InvalidStructure(message) => message,
+            other => panic!("expected invalid PDF structure error, got: {other}"),
+        }
+    }
 
     #[test]
     fn normal_cache_hits_and_evicts_fifo_per_shard() {
@@ -688,5 +777,85 @@ mod tests {
         assert!(cacheable_normal_object(&Object::Stream(small)));
         assert!(!cacheable_normal_object(&Object::Stream(large)));
         assert!(cacheable_normal_object(&Object::Integer(7)));
+    }
+
+    #[test]
+    fn page_tree_kids_resolve_through_reference_chain() {
+        let mut source = TestObjectSource::default();
+        source.0.insert((1, 0), Object::Reference((2, 0)));
+        source
+            .0
+            .insert((2, 0), Object::Array(vec![Object::Reference((9, 0))]));
+
+        assert_eq!(
+            page_tree_kid_ids(&source, &Object::Reference((1, 0))).unwrap(),
+            vec![(9, 0)]
+        );
+    }
+
+    #[test]
+    fn page_tree_kids_reference_cycle_is_structural_error() {
+        let mut source = TestObjectSource::default();
+        source.0.insert((1, 0), Object::Reference((2, 0)));
+        source.0.insert((2, 0), Object::Reference((1, 0)));
+
+        let message = invalid_structure_message(
+            page_tree_kid_ids(&source, &Object::Reference((1, 0))).unwrap_err(),
+        );
+        assert!(message.contains("/Kids") && message.contains("cycle"));
+    }
+
+    #[test]
+    fn page_tree_kids_reference_chain_is_bounded() {
+        let mut source = TestObjectSource::default();
+        for number in 1..=MAX_PAGE_TREE_REFERENCE_CHAIN as u32 {
+            source
+                .0
+                .insert((number, 0), Object::Reference((number + 1, 0)));
+        }
+        source.0.insert(
+            (MAX_PAGE_TREE_REFERENCE_CHAIN as u32 + 1, 0),
+            Object::Array(vec![Object::Reference((999, 0))]),
+        );
+
+        let message = invalid_structure_message(
+            page_tree_kid_ids(&source, &Object::Reference((1, 0))).unwrap_err(),
+        );
+        assert!(message.contains("/Kids") && message.contains("maximum depth"));
+    }
+
+    #[test]
+    fn page_tree_kids_missing_reference_is_structural_error() {
+        let source = TestObjectSource::default();
+
+        let message = invalid_structure_message(
+            page_tree_kid_ids(&source, &Object::Reference((99, 0))).unwrap_err(),
+        );
+        assert!(message.contains("/Kids") && message.contains("missing object"));
+    }
+
+    #[test]
+    fn page_tree_kids_non_array_target_is_structural_error() {
+        let mut source = TestObjectSource::default();
+        source.0.insert((1, 0), Object::Integer(42));
+
+        let message = invalid_structure_message(
+            page_tree_kid_ids(&source, &Object::Reference((1, 0))).unwrap_err(),
+        );
+        assert!(message.contains("/Kids") && message.contains("array"));
+    }
+
+    #[test]
+    fn indirect_kids_array_keeps_direct_child_rejection() {
+        let mut source = TestObjectSource::default();
+        source.0.insert(
+            (1, 0),
+            Object::Array(vec![Object::Dictionary(lopdf::Dictionary::new())]),
+        );
+
+        let message = invalid_structure_message(
+            page_tree_kid_ids(&source, &Object::Reference((1, 0))).unwrap_err(),
+        );
+        assert!(message.contains("direct object"));
     }
 }
