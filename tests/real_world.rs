@@ -1352,6 +1352,32 @@ fn trf4_like_split_then_merge_roundtrip_preserves_page_count() {
 }
 
 #[test]
+fn indirect_page_tree_kids_array_counts_and_splits() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("indirect-kids.pdf");
+    let output_pattern = temp.path().join("indirect-page-%d.pdf");
+    let output = temp.path().join("indirect-page-1.pdf");
+    let mut pdf = RawPdf::new(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n");
+    let pages = pdf.reserve();
+    let page = pdf.add(
+        format!("<</Type/Page/Parent {pages} 0 R/MediaBox[0 0 612 792]/Resources<<>>>>")
+            .into_bytes(),
+    );
+    let kids = pdf.add(format!("[{page} 0 R]").into_bytes());
+    pdf.put(
+        pages,
+        format!("<</Type/Pages/Count 1/Kids {kids} 0 R>>").into_bytes(),
+    );
+    let catalog = pdf.add(format!("<</Type/Catalog/Pages {pages} 0 R>>").into_bytes());
+    pdf.write_to(&input, format!("/Root {catalog} 0 R").as_bytes());
+
+    assert_eq!(page_count(&input).unwrap(), 1);
+    split_pages(&input, output_pattern.to_str().unwrap()).unwrap();
+    assert_eq!(Document::load(&output).unwrap().get_pages().len(), 1);
+    QpdfValidator::detect().validate(&output, 1);
+}
+
+#[test]
 fn page_count_rejects_direct_page_tree_kids() {
     // qpdf-qtest's 0213-direct-pages.pdf shape: /Kids holding inline page
     // dictionaries instead of references. pdq used to silently report 0
