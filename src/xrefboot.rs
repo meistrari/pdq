@@ -364,9 +364,10 @@ fn decode_stream_entries(content: &[u8], dict: &Dictionary) -> Option<EntrySink>
 
     let mut sink = EntrySink::new();
     let mut pos = 0usize;
-    for range in index.chunks_exact(2) {
-        let start = u32::try_from(range[0]).ok()?;
-        let count = usize::try_from(range[1]).ok()?;
+    let (ranges, _) = index.as_chunks::<2>();
+    for [start, count] in ranges {
+        let start = u32::try_from(*start).ok()?;
+        let count = usize::try_from(*count).ok()?;
         // Every declared row must actually be present in the content.
         if content.len().checked_sub(pos)? / row_width < count {
             return None;

@@ -236,10 +236,11 @@ fn parse_split_outputs(
     values: Vec<String>,
 ) -> Result<Vec<SplitOutput>, Box<dyn std::error::Error>> {
     let mut outputs = Vec::new();
-    for pair in values.chunks_exact(2) {
+    let (pairs, _) = values.as_chunks::<2>();
+    for [range, path] in pairs {
         outputs.push(SplitOutput {
-            range: PageRangeGroup::parse(pair[0].clone())?,
-            path: PathBuf::from(&pair[1]),
+            range: PageRangeGroup::parse(range.clone())?,
+            path: PathBuf::from(path),
         });
     }
     Ok(outputs)
