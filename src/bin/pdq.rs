@@ -24,6 +24,8 @@ enum Command {
     PageCount(PageCountArgs),
     /// Print each page's size in PDF points and rotation as JSON, without rendering
     Dimensions(DimensionsArgs),
+    /// Print a content fingerprint per page as JSON (equal only for pages that draw the same)
+    Fingerprint(FingerprintArgs),
     #[cfg(feature = "render")]
     Render(RenderArgs),
     /// Extract positioned text runs as JSON (points at 72 dpi, top-left origin)
@@ -95,6 +97,19 @@ struct PageCountArgs {
 #[derive(Debug, Args)]
 struct DimensionsArgs {
     input: PathBuf,
+
+    /// Password for encrypted inputs
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct FingerprintArgs {
+    input: PathBuf,
+
+    /// Page ranges to fingerprint (same syntax as render); all pages when omitted
+    #[arg(long, value_name = "RANGES")]
+    pages: Option<String>,
 
     /// Password for encrypted inputs
     #[arg(long, value_name = "PASSWORD")]
@@ -187,6 +202,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let pages = page_dimensions_with_password(&args.input, args.password.as_deref())?;
             println!("{}", dimensions_json(&pages));
         }
+        Command::Fingerprint(args) => {
+            let options = pdq::FingerprintOptions {
+                pages: args.pages.map(PageRangeGroup::parse).transpose()?,
+                password: args.password,
+            };
+            let pages = pdq::fingerprint_pages(&args.input, &options)?;
+            println!("{}", pdq::fingerprints_to_json(&pages));
+        }
         #[cfg(feature = "render")]
         Command::Render(args) => {
             let options = pdq::RenderOptions {
@@ -213,10 +236,11 @@ fn parse_split_outputs(
     values: Vec<String>,
 ) -> Result<Vec<SplitOutput>, Box<dyn std::error::Error>> {
     let mut outputs = Vec::new();
-    for pair in values.chunks_exact(2) {
+    let (pairs, _) = values.as_chunks::<2>();
+    for [range, path] in pairs {
         outputs.push(SplitOutput {
-            range: PageRangeGroup::parse(pair[0].clone())?,
-            path: PathBuf::from(&pair[1]),
+            range: PageRangeGroup::parse(range.clone())?,
+            path: PathBuf::from(path),
         });
     }
     Ok(outputs)

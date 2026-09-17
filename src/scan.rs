@@ -43,7 +43,7 @@ impl UsedNames {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResourceType {
+pub(crate) enum ResourceType {
     ColorSpace,
     ExtGState,
     Font,
@@ -51,6 +51,21 @@ enum ResourceType {
     Properties,
     Shading,
     XObject,
+}
+
+impl ResourceType {
+    /// The `/Resources` sub-dictionary names of this type live in.
+    pub(crate) fn dictionary_key(self) -> &'static [u8] {
+        match self {
+            Self::ColorSpace => b"ColorSpace",
+            Self::ExtGState => b"ExtGState",
+            Self::Font => b"Font",
+            Self::Pattern => b"Pattern",
+            Self::Properties => b"Properties",
+            Self::Shading => b"Shading",
+            Self::XObject => b"XObject",
+        }
+    }
 }
 
 struct ScanState<'a> {
@@ -257,7 +272,7 @@ fn scan_names(data: &[u8]) -> Option<UsedNames> {
 /// containing an inline image is returned unchanged: its binary payload may
 /// contain `%` bytes that must not be treated as comment starts, so those
 /// streams keep the parse-or-fallback behavior they have today.
-fn strip_comments(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+pub(crate) fn strip_comments(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     use std::borrow::Cow;
 
     if memchr::memchr(b'%', data).is_none() {
@@ -351,7 +366,7 @@ fn scan_names_cached(
     used
 }
 
-fn resource_type_for_operator(operator: &str) -> Option<ResourceType> {
+pub(crate) fn resource_type_for_operator(operator: &str) -> Option<ResourceType> {
     match operator {
         "CS" | "cs" => Some(ResourceType::ColorSpace),
         "gs" => Some(ResourceType::ExtGState),

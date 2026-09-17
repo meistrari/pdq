@@ -89,7 +89,7 @@ fn normalize_filter_name(name: &mut Vec<u8>) -> bool {
     true
 }
 
-fn stream_filters(stream: &Stream) -> Option<Vec<Vec<u8>>> {
+pub(crate) fn stream_filters(stream: &Stream) -> Option<Vec<Vec<u8>>> {
     match stream.dict.get(b"Filter").ok()? {
         Object::Name(name) => Some(vec![canonical_filter_name(name).to_vec()]),
         Object::Array(filters) => {
@@ -106,7 +106,7 @@ fn stream_filters(stream: &Stream) -> Option<Vec<Vec<u8>>> {
     }
 }
 
-fn decode_params_at(params: Option<&Object>, index: usize) -> Option<&Dictionary> {
+pub(crate) fn decode_params_at(params: Option<&Object>, index: usize) -> Option<&Dictionary> {
     match params? {
         Object::Dictionary(params) => Some(params),
         Object::Array(params) => params.get(index).and_then(|params| match params {
@@ -117,7 +117,7 @@ fn decode_params_at(params: Option<&Object>, index: usize) -> Option<&Dictionary
     }
 }
 
-fn decode_filter(
+pub(crate) fn decode_filter(
     filter: &[u8],
     input: &[u8],
     params: Option<&Dictionary>,

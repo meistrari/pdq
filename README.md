@@ -88,6 +88,9 @@ pdq merge --output merged.pdf a.pdf b.pdf c.pdf
 # Every page's size and rotation as JSON, without rendering
 pdq dimensions input.pdf
 
+# A content fingerprint per page as JSON (find the same page in other files)
+pdq fingerprint input.pdf
+
 # Rasterize to PNG at 300 DPI
 pdq render --output 'page-%d.png' --dpi 300 --pages 1-10 input.pdf
 
@@ -205,6 +208,49 @@ Mixed-size documents report each page's true size, and per-page damage
 degrades gracefully: a missing or malformed box falls back to the inherited
 value, then to A4; a malformed `/Rotate` falls back to 0.
 
+### `pdq fingerprint` — per-page content fingerprints
+
+```sh
+pdq fingerprint [--pages RANGES] [--password PW] input.pdf
+```
+
+Prints a SHA-256 per page, as JSON on stdout, that is equal for two pages
+only when they draw the same thing — so the same page can be recognized in
+another file, e.g. to drop pages repeated across overlapping downloads:
+
+```json
+{"version":"pfp1","pages":[{"page":1,"fingerprint":"e0c153a9…"},{"page":2,"fingerprint":"2bb6497c…"}]}
+```
+
+The hash covers everything drawn — the content stream operators, the fonts,
+images and forms they use, the page geometry and the annotations — and is
+built so that how a file stores a page does not matter:
+
+- object numbers, resource names (`/F1` vs `/Xi236` for the same font) and
+  content-stream layout (whitespace, comments, `/Contents` split into parts)
+  are normalized away, and only resources the content actually uses count;
+- Flate compression and PNG/TIFF predictors are undone before hashing;
+- bookkeeping in recognized dictionary types is left out: back-references, structure-tree
+  indices, XMP metadata, modification dates, annotation names and link
+  destinations/actions (a link into the document names a page number, which
+  shifts when the page moves). A form widget's value and appearance defaults
+  inherited from its parent field are drawn, so they are hashed. Matching
+  names in glyph or resource dictionaries always count;
+- known per-download stamps are masked: the PJe line `Este documento foi
+  gerado pelo usuário … em dd/mm/yyyy hh:mm:ss` hashes as a placeholder, so
+  two downloads of the same case still match page for page. The line is
+  masked only in the known footer layout: consecutive text objects using
+  the same 7-point font, at `(70, -18)` for the download line and `(70, -28)`
+  for `Número do documento: …`, before the page/form transform. Ambiguous
+  pairs and other layouts, including body quotations, stay in the hash.
+
+The contract is one-sided: equal fingerprints mean the pages draw the same;
+visually identical pages written differently (re-encoded JPEGs, re-subset
+fonts) can still differ. Work is bounded: decoded content is capped at
+128 MiB per page or form and inflated data at 512 MiB per stream; past a cap
+the bytes are hashed undecoded, which can only make equal pages differ. Compare fingerprints only within one `version`;
+any change to what is hashed bumps it.
+
 ### `pdq render` — rasterize to PNG
 
 ```sh
@@ -313,8 +359,8 @@ outputs are always written unencrypted.
 Files encrypted with only an owner password — the overwhelmingly common
 "permissions" encryption — open with no flags at all, because the empty user
 password is tried first. Files that require a real password take
-`--password` on `split`, `split-pages`, `merge`, `page-count`, and
-`dimensions`; a wrong password is reported as exactly that, not as a parse
+`--password` on `split`, `split-pages`, `merge`, `page-count`,
+`dimensions`, and `fingerprint`; a wrong password is reported as exactly that, not as a parse
 failure.
 
 ## Damaged PDFs
