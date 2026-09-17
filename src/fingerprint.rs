@@ -1154,6 +1154,8 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
     /// The inheritable attributes a child of page-tree node `id` sees:
     /// the node's own, with gaps filled from its ancestors. Walks up
     /// iteratively to the nearest cached node, then caches every node passed.
+    /// Depth limits and cycles fail before caching or returning partial
+    /// attributes, which could otherwise hide drawn state on later pages.
     fn ancestor_attributes(&mut self, id: ObjectId) -> Result<InheritedAttributes> {
         let mut chain: Vec<(ObjectId, InheritedAttributes)> = Vec::new();
         let mut next = Some(id);
@@ -1163,8 +1165,15 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
                 inherited = cached.clone();
                 break;
             }
-            if chain.len() >= MAX_CHAIN || chain.iter().any(|(seen, _)| *seen == id) {
-                break;
+            if chain.len() >= MAX_CHAIN {
+                return Err(PdfOpsError::InvalidStructure(format!(
+                    "page parent chain deeper than {MAX_CHAIN} while fingerprinting"
+                )));
+            }
+            if chain.iter().any(|(seen, _)| *seen == id) {
+                return Err(PdfOpsError::InvalidStructure(
+                    "cycle in page parent chain while fingerprinting".into(),
+                ));
             }
             let node = match self.source.get_object_value(id) {
                 Ok(node) => node,
@@ -1738,13 +1747,13 @@ fn feed_real(hasher: &mut Sha256, value: f32) {
 mod tests {
     use std::io::Write;
 
-    use lopdf::{dictionary, Stream};
+    use lopdf::{dictionary, Document, Stream};
 
     use lopdf::{content::Operation, Object};
 
     use super::{
         decode_content, inflate, is_pje_document_number, is_pje_generated_by, name_tokens,
-        resource_operand, Predictor, ResourceType,
+        resource_operand, PageHasher, Predictor, ResourceType, MAX_CHAIN,
     };
 
     fn zlib(data: &[u8]) -> Vec<u8> {
@@ -1759,6 +1768,90 @@ mod tests {
 
     fn name(value: &str) -> Object {
         Object::Name(value.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn depth_limited_ancestry_does_not_poison_later_page_fingerprints() {
+        let mut document = Document::new();
+        let font = document.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let root = document.add_object(dictionary! {
+            "Type" => "Pages",
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            "CropBox" => vec![0.into(), 0.into(), 500.into(), 700.into()],
+            "Rotate" => 90,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+        });
+        let mut parents = vec![root];
+        for _ in 0..MAX_CHAIN {
+            let parent = document.add_object(dictionary! {
+                "Type" => "Pages", "Parent" => *parents.last().unwrap(),
+            });
+            parents.push(parent);
+        }
+        let content = document.add_object(Stream::new(
+            Default::default(),
+            b"BT /F1 12 Tf 72 700 Td (Inherited) Tj ET".to_vec(),
+        ));
+        // Exercise /Parent resolution directly: damaged files can expose a
+        // longer parent chain than their /Kids traversal would suggest.
+        let mut page = |parent| {
+            document.add_object(dictionary! {
+                "Type" => "Page", "Parent" => parent, "Contents" => content,
+            })
+        };
+        let deep = page(parents[MAX_CHAIN]);
+        let boundary = page(parents[MAX_CHAIN - 1]);
+        let shallow = page(parents[1]);
+        let page_ids = [deep, boundary, shallow];
+        let mut hasher = PageHasher::new(&document, &page_ids);
+        let truncated = hasher.page(deep);
+        let after_truncation = hasher.page(shallow).unwrap();
+        let fresh = PageHasher::new(&document, &page_ids).page(shallow).unwrap();
+        assert_eq!(
+            after_truncation, fresh,
+            "page selection order must not lose inherited state"
+        );
+        assert!(matches!(
+            truncated,
+            Err(crate::PdfOpsError::InvalidStructure(_))
+        ));
+
+        // Exactly MAX_CHAIN ancestors still resolve normally, including all
+        // geometry and the font, with or without a warmed ancestor cache.
+        assert_eq!(hasher.page(boundary).unwrap(), fresh);
+        assert_eq!(
+            PageHasher::new(&document, &page_ids)
+                .page(boundary)
+                .unwrap(),
+            fresh
+        );
+    }
+
+    #[test]
+    fn cyclic_ancestry_is_not_cached_as_resolved() {
+        let mut document = Document::new();
+        let first = document.new_object_id();
+        let second = document.add_object(dictionary! {
+            "Type" => "Pages", "Parent" => first, "Rotate" => 90,
+        });
+        document.objects.insert(
+            first,
+            dictionary! {
+                "Type" => "Pages", "Parent" => second,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            }
+            .into(),
+        );
+        let mut hasher = PageHasher::new(&document, &[]);
+        for parent in [first, second, first] {
+            assert!(matches!(
+                hasher.ancestor_attributes(parent),
+                Err(crate::PdfOpsError::InvalidStructure(_))
+            ));
+        }
+        assert!(hasher.ancestors.is_empty());
     }
 
     #[test]
