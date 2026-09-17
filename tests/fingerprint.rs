@@ -1331,7 +1331,7 @@ fn fingerprint_cli_prints_versioned_json_for_selected_pages() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["version"], "pfp2");
+    assert_eq!(json["version"], "pfp1");
     let pages = json["pages"].as_array().unwrap();
     assert_eq!(
         pages

@@ -219,7 +219,7 @@ only when they draw the same thing — so the same page can be recognized in
 another file, e.g. to drop pages repeated across overlapping downloads:
 
 ```json
-{"version":"pfp2","pages":[{"page":1,"fingerprint":"e0c153a9…"},{"page":2,"fingerprint":"2bb6497c…"}]}
+{"version":"pfp1","pages":[{"page":1,"fingerprint":"e0c153a9…"},{"page":2,"fingerprint":"2bb6497c…"}]}
 ```
 
 The hash covers everything drawn — the content stream operators, the fonts,

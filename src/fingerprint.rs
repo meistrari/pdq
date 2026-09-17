@@ -68,7 +68,7 @@ use crate::{
 
 /// Version of the serialization below. Fingerprints are only comparable
 /// within one version.
-pub const FINGERPRINT_VERSION: &str = "pfp2";
+pub const FINGERPRINT_VERSION: &str = "pfp1";
 
 /// Deepest object nesting followed before giving up on the page (matches the
 /// page-tree and copy depth caps elsewhere in the crate).
