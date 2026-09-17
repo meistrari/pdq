@@ -791,7 +791,7 @@ fn every_resource_operator_resolves_names_to_resources() {
         },
         Case {
             category: "Pattern",
-            content: "/Pattern cs /$ scn /Pattern CS /$ SCN 0 0 10 10 re B",
+            content: "/Pattern cs /$ scn /Pattern CS 0.2 0.4 0.6 /$ SCN 0 0 10 10 re B",
             resource: || dictionary! { "PatternType" => 2, "Shading" => shading(1.0) }.into(),
             different: || dictionary! { "PatternType" => 2, "Shading" => shading(0.5) }.into(),
         },
@@ -803,7 +803,7 @@ fn every_resource_operator_resolves_names_to_resources() {
         },
         Case {
             category: "Properties",
-            content: "/OC /$ BDC 0 0 10 10 re f EMC /Mark /$ DP",
+            content: "/OC /$ BDC /Span <</ActualText (x)>> BDC 0 0 10 10 re f EMC EMC /Mark /$ DP",
             resource: || {
                 dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Layer A") }.into()
             },

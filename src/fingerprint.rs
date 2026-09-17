@@ -1435,12 +1435,98 @@ mod tests {
 
     use lopdf::{dictionary, Stream};
 
-    use super::{decode_content, inflate, is_pje_document_number, is_pje_generated_by, Predictor};
+    use lopdf::{content::Operation, Object};
+
+    use super::{
+        decode_content, inflate, is_pje_document_number, is_pje_generated_by, resource_operand,
+        Predictor, ResourceType,
+    };
 
     fn zlib(data: &[u8]) -> Vec<u8> {
         let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
         encoder.write_all(data).unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn operation(operator: &str, operands: Vec<Object>) -> Operation {
+        Operation::new(operator, operands)
+    }
+
+    fn name(value: &str) -> Object {
+        Object::Name(value.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn resource_operand_picks_the_name_each_operator_takes() {
+        let cases = [
+            // `/F1 12 Tf`: the name comes first, the size after it.
+            (
+                operation("Tf", vec![name("F1"), 12.into()]),
+                Some((0, ResourceType::Font)),
+            ),
+            (
+                operation("Do", vec![name("Im0")]),
+                Some((0, ResourceType::XObject)),
+            ),
+            (
+                operation("gs", vec![name("GS1")]),
+                Some((0, ResourceType::ExtGState)),
+            ),
+            (
+                operation("sh", vec![name("Sh0")]),
+                Some((0, ResourceType::Shading)),
+            ),
+            (
+                operation("cs", vec![name("CS0")]),
+                Some((0, ResourceType::ColorSpace)),
+            ),
+            (
+                operation("CS", vec![name("CS0")]),
+                Some((0, ResourceType::ColorSpace)),
+            ),
+            // Uncoloured tiling pattern: components first, the pattern name last.
+            (
+                operation("scn", vec![0.2.into(), 0.4.into(), 0.6.into(), name("P0")]),
+                Some((3, ResourceType::Pattern)),
+            ),
+            (
+                operation("SCN", vec![name("P0")]),
+                Some((0, ResourceType::Pattern)),
+            ),
+            // Plain colour components name nothing.
+            (
+                operation("scn", vec![0.2.into(), 0.4.into(), 0.6.into()]),
+                None,
+            ),
+            // `/Tag /Props BDC`: the tag is literal, the properties name second.
+            (
+                operation("BDC", vec![name("OC"), name("MC0")]),
+                Some((1, ResourceType::Properties)),
+            ),
+            (
+                operation("DP", vec![name("Mark"), name("MC0")]),
+                Some((1, ResourceType::Properties)),
+            ),
+            // Inline properties dictionary: nothing to resolve.
+            (
+                operation(
+                    "BDC",
+                    vec![name("Span"), Object::Dictionary(Default::default())],
+                ),
+                None,
+            ),
+            (operation("BMC", vec![name("Span")]), None),
+            (operation("Tj", vec![Object::string_literal("F1")]), None),
+        ];
+        for (op, expected) in cases {
+            assert_eq!(
+                resource_operand(&op),
+                expected,
+                "{} {:?}",
+                op.operator,
+                op.operands
+            );
+        }
     }
 
     #[test]
