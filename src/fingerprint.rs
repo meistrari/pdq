@@ -22,14 +22,21 @@
 //!
 //! What never takes part: back-references (`/Parent`, an annotation's `/P`),
 //! structure-tree indices, XMP metadata, modification dates, annotation names
-//! and link destinations/actions. None of them is drawn.
+//! and link destinations/actions. None of them is drawn. A widget's `/Parent`
+//! field is the exception in substance: the value and appearance defaults a
+//! viewer draws from it are hashed explicitly (see [`INHERITED_FIELD_KEYS`]).
 //!
 //! Volatile stamps: some court systems stamp every page of a download with
-//! the downloading user and timestamp. A text-showing operand that matches
-//! one of the known stamp shapes (see [`is_volatile_text`]) hashes as a fixed
-//! placeholder, so two downloads of the same page still match. Changing that
-//! list, or anything else in the serialization, changes every fingerprint and
-//! must bump [`FINGERPRINT_VERSION`].
+//! the downloading user and timestamp. Such a line hashes as a fixed
+//! placeholder, but only where it is drawn as the stamp (see
+//! [`volatile_operands`]), so two downloads of the same page still match while
+//! page text quoting the sentence is hashed as it is. Changing those rules,
+//! or anything else in the serialization, changes every fingerprint and must
+//! bump [`FINGERPRINT_VERSION`].
+//!
+//! Work is bounded: decoded content is capped per page and per form, and
+//! inflated stream data per stream. Past a cap the bytes are hashed undecoded,
+//! which can only make equal pages differ, never different pages equal.
 
 use std::{
     borrow::Cow,
@@ -63,6 +70,11 @@ pub const FINGERPRINT_VERSION: &str = "pfp1";
 const MAX_DEPTH: usize = 256;
 /// Longest `/Parent` chain followed when resolving inherited attributes.
 const MAX_CHAIN: usize = 256;
+/// Decoded content-stream bytes canonicalized per page (all `/Contents` parts
+/// together) and per form XObject or tiling pattern.
+const MAX_CONTENT_BYTES: usize = 128 * 1024 * 1024;
+/// Inflated bytes hashed per non-content stream (images, fonts, ICC).
+const MAX_INFLATED_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct FingerprintOptions {
@@ -176,6 +188,7 @@ const TAG_UNRESOLVED: u8 = b'U';
 const TAG_VOLATILE: u8 = b'V';
 const TAG_BYTES_INFLATED: u8 = b'z';
 const TAG_BYTES_RAW: u8 = b'w';
+const TAG_FIELD: u8 = b'F';
 
 /// Dictionary keys that are never drawn and vary between copies of the same
 /// page: back-references, structure indices, metadata, edit bookkeeping, and
@@ -195,6 +208,17 @@ const SKIPPED_KEYS: [&[u8]; 12] = [
     b"AA",
     b"PA",
 ];
+
+/// Field attributes a widget annotation inherits through `/Parent` (ISO
+/// 32000-1 §12.7.3) that decide what a viewer draws when it (re)generates the
+/// widget's appearance: the value, its defaults and the text layout. `/Parent`
+/// itself stays out of the hash — it leads to `/Kids` and every sibling widget.
+const INHERITED_FIELD_KEYS: [&[u8]; 12] = [
+    b"FT", b"V", b"DV", b"DA", b"DS", b"RV", b"Ff", b"Q", b"Opt", b"MaxLen", b"TI", b"I",
+];
+
+/// AcroForm entries a widget's appearance falls back to.
+const ACROFORM_DEFAULT_KEYS: [&[u8]; 4] = [b"DA", b"Q", b"DR", b"NeedAppearances"];
 
 /// Colour-space operands that name a built-in family rather than a
 /// `/ColorSpace` resource (inline-image abbreviations included).
@@ -226,6 +250,9 @@ struct Flags {
     unresolved: bool,
     /// Uses optional content, whose visibility is set at document level.
     optional_content: bool,
+    /// Has a form-field widget, whose appearance falls back to AcroForm
+    /// defaults.
+    form_fields: bool,
 }
 
 impl Default for Flags {
@@ -235,6 +262,7 @@ impl Default for Flags {
             contextual: false,
             unresolved: false,
             optional_content: false,
+            form_fields: false,
         }
     }
 }
@@ -245,6 +273,7 @@ impl Flags {
         self.contextual |= other.contextual;
         self.unresolved |= other.unresolved;
         self.optional_content |= other.optional_content;
+        self.form_fields |= other.form_fields;
     }
 }
 
@@ -253,6 +282,7 @@ struct Memo {
     digest: [u8; 32],
     unresolved: bool,
     optional_content: bool,
+    form_fields: bool,
 }
 
 struct PageHasher<'s, S: ObjectSource> {
@@ -331,6 +361,17 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             let properties = self.catalog_entry(&[b"OCProperties"])?;
             self.feed_optional(&mut hasher, properties.as_ref())?;
         }
+        if flags.form_fields {
+            hasher.update(b"acroform-defaults");
+            let acroform = match self.catalog_entry(&[b"AcroForm"])? {
+                Some(value) => self.resolve_dictionary(&value)?,
+                None => None,
+            };
+            for key in ACROFORM_DEFAULT_KEYS {
+                let value = acroform.as_ref().and_then(|form| form.get(key).ok());
+                self.feed_optional(&mut hasher, value)?;
+            }
+        }
 
         Ok(hasher.finalize().into())
     }
@@ -355,7 +396,8 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
 
     /// A page's decoded `/Contents`, parts joined with `\n` (a part boundary is
     /// white-space). Unlike the pruning scan, an indirect array is followed.
-    /// `None` when any part is missing or cannot be decoded.
+    /// `None` when any part is missing, cannot be decoded, or the parts decode
+    /// past [`MAX_CONTENT_BYTES`].
     fn page_content(&self, page: &Dictionary) -> Result<Option<Vec<u8>>> {
         let Ok(contents) = page.get(b"Contents") else {
             return Ok(Some(Vec::new()));
@@ -370,7 +412,8 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             let Some(Object::Stream(stream)) = self.dereference(part)? else {
                 return Ok(None);
             };
-            let Ok(decoded) = crate::filter::decode_stream_content(&stream) else {
+            let budget = MAX_CONTENT_BYTES.saturating_sub(data.len());
+            let Some(decoded) = decode_content(&stream, budget) else {
                 return Ok(None);
             };
             data.extend(decoded);
@@ -412,13 +455,14 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         };
 
         let mut flags = Flags::default();
+        let volatile = volatile_operands(&operations);
         hasher.update([TAG_CONTENT]);
         feed_len(hasher, operations.len());
-        for operation in &operations {
+        for (position, operation) in operations.iter().enumerate() {
             feed_bytes(hasher, TAG_OPERATION, operation.operator.as_bytes());
             feed_len(hasher, operation.operands.len());
             let resource_slot = resource_operand(operation);
-            let volatile_slot = volatile_operand(operation);
+            let volatile_slot = volatile.get(&position).copied();
             for (index, operand) in operation.operands.iter().enumerate() {
                 if volatile_slot == Some(index) {
                     hasher.update([TAG_VOLATILE]);
@@ -650,6 +694,7 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             return Ok(Flags {
                 unresolved: memo.unresolved,
                 optional_content: memo.optional_content,
+                form_fields: memo.form_fields,
                 ..Flags::default()
             });
         }
@@ -697,6 +742,7 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
                         digest,
                         unresolved: flags.unresolved,
                         optional_content: flags.optional_content,
+                        form_fields: flags.form_fields,
                     },
                 );
             }
@@ -736,6 +782,49 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             feed_bytes(hasher, TAG_NAME, key);
             flags.merge(self.feed_object(hasher, value)?);
         }
+        if dictionary.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Widget") {
+            flags.merge(self.feed_inherited_field(hasher, dictionary)?);
+        }
+        Ok(flags)
+    }
+
+    /// The [`INHERITED_FIELD_KEYS`] a widget does not set itself, resolved up
+    /// its `/Parent` chain (nearest ancestor wins), appended after the widget
+    /// dictionary. A widget without an appearance stream is drawn from these,
+    /// so two widgets differing only in their parent field's value must differ.
+    fn feed_inherited_field(&mut self, hasher: &mut Sha256, widget: &Dictionary) -> Result<Flags> {
+        let mut inherited: Vec<(&[u8], Object)> = Vec::new();
+        let mut parent = widget.get(b"Parent").ok().cloned();
+        let mut hops = 0usize;
+        while let Some(link @ Object::Reference(_)) = parent {
+            hops += 1;
+            if hops > MAX_CHAIN {
+                break;
+            }
+            let Some(field) = self.resolve_dictionary(&link)? else {
+                break;
+            };
+            for key in INHERITED_FIELD_KEYS {
+                if !widget.has(key) && !inherited.iter().any(|(seen, _)| *seen == key) {
+                    if let Ok(value) = field.get(key) {
+                        inherited.push((key, value.clone()));
+                    }
+                }
+            }
+            parent = field.get(b"Parent").ok().cloned();
+        }
+        inherited.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut flags = Flags {
+            form_fields: true,
+            ..Flags::default()
+        };
+        hasher.update([TAG_FIELD]);
+        feed_len(hasher, inherited.len());
+        for (key, value) in &inherited {
+            feed_bytes(hasher, TAG_NAME, key);
+            flags.merge(self.feed_object(hasher, value)?);
+        }
         Ok(flags)
     }
 
@@ -760,7 +849,7 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         hasher.update([TAG_STREAM]);
 
         if is_content_stream(stream) {
-            if let Ok(data) = crate::filter::decode_stream_content(stream) {
+            if let Some(data) = decode_content(stream, MAX_CONTENT_BYTES) {
                 let own = match stream.dict.get(b"Resources") {
                     Ok(value) => self.resolve_dictionary(value)?,
                     Err(_) => None,
@@ -944,16 +1033,16 @@ fn resource_operand(operation: &Operation) -> Option<(usize, ResourceType)> {
     matches!(operation.operands.get(index), Some(Object::Name(_))).then_some((index, resource_type))
 }
 
-/// Which operand of a text-showing `operation` is a known volatile stamp.
-fn volatile_operand(operation: &Operation) -> Option<usize> {
+/// The text a text-showing operation draws (`Tj`, `'`, `"`, `TJ` strings
+/// concatenated) and the index of the operand holding it.
+fn shown_text(operation: &Operation) -> Option<(usize, Cow<'_, [u8]>)> {
     let index = match operation.operator.as_str() {
-        "Tj" | "'" => 0,
+        "Tj" | "'" | "TJ" => 0,
         "\"" => 2,
-        "TJ" => 0,
         _ => return None,
     };
-    let text: Cow<'_, [u8]> = match operation.operands.get(index)? {
-        Object::String(bytes, _) => Cow::Borrowed(bytes),
+    let text = match operation.operands.get(index)? {
+        Object::String(bytes, _) => Cow::Borrowed(bytes.as_slice()),
         Object::Array(items) => Cow::Owned(
             items
                 .iter()
@@ -966,19 +1055,59 @@ fn volatile_operand(operation: &Operation) -> Option<usize> {
         ),
         _ => return None,
     };
-    is_volatile_text(&text).then_some(index)
+    Some((index, text))
 }
 
-/// Known per-download stamps. Each rule must match the WHOLE string and be
-/// specific enough that no page content could plausibly match it: masking
-/// hides a difference, so an over-broad rule is a false positive.
+/// Operands to mask as volatile stamps, keyed by operation index.
 ///
-/// - PJe: `Este documento foi gerado pelo usuário <user> em dd/mm/yyyy hh:mm:ss`,
-///   written by the download stamp in WinAnsi (`á` = 0xE1) or UTF-8.
-pub(crate) fn is_volatile_text(text: &[u8]) -> bool {
-    is_pje_generated_by(text)
+/// Matching the sentence is not enough: page text can quote it, and masking a
+/// difference there would make distinct pages equal. A PJe download-stamp
+/// line is masked only where it is drawn the way the stamp draws it:
+/// - it is the only text shown in its own `BT … ET` text object, and
+/// - the same content also draws the stamp's document-number line
+///   (`Número do documento: <digits>`), which stays in the hash.
+///
+/// Two pages can then only collide on the masked line if they carry the same
+/// PJe document number and are otherwise identical — the same page from two
+/// downloads.
+fn volatile_operands(operations: &[Operation]) -> HashMap<usize, usize> {
+    let mut masked = HashMap::new();
+    let has_document_number = operations
+        .iter()
+        .filter_map(shown_text)
+        .any(|(_, text)| is_pje_document_number(&text));
+    if !has_document_number {
+        return masked;
+    }
+
+    let mut shown_in_block: Vec<usize> = Vec::new();
+    let mut in_text_object = false;
+    for (position, operation) in operations.iter().enumerate() {
+        match operation.operator.as_str() {
+            "BT" => {
+                in_text_object = true;
+                shown_in_block.clear();
+            }
+            "ET" => {
+                if let [only] = shown_in_block.as_slice() {
+                    if let Some((operand, text)) = shown_text(&operations[*only]) {
+                        if is_pje_generated_by(&text) {
+                            masked.insert(*only, operand);
+                        }
+                    }
+                }
+                in_text_object = false;
+                shown_in_block.clear();
+            }
+            "Tj" | "'" | "\"" | "TJ" if in_text_object => shown_in_block.push(position),
+            _ => {}
+        }
+    }
+    masked
 }
 
+/// PJe stamp: `Este documento foi gerado pelo usuário <user> em dd/mm/yyyy
+/// hh:mm:ss`, in WinAnsi (`á` = 0xE1) or UTF-8. The whole string must match.
 fn is_pje_generated_by(text: &[u8]) -> bool {
     const PREFIX: &[u8] = b"Este documento foi gerado pelo usu";
     // " em dd/mm/yyyy hh:mm:ss"
@@ -1005,6 +1134,18 @@ fn is_pje_generated_by(text: &[u8]) -> bool {
                 b'0' => byte.is_ascii_digit(),
                 _ => byte == shape,
             })
+}
+
+/// PJe stamp: `Número do documento: <digits>`, in WinAnsi (`ú` = 0xFA) or
+/// UTF-8. The whole string must match.
+fn is_pje_document_number(text: &[u8]) -> bool {
+    let Some(digits) = text
+        .strip_prefix(b"N\xfamero do documento: ".as_slice())
+        .or_else(|| text.strip_prefix("Número do documento: ".as_bytes()))
+    else {
+        return false;
+    };
+    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
 }
 
 fn is_content_stream(stream: &Stream) -> bool {
@@ -1085,14 +1226,30 @@ impl Predictor {
     }
 }
 
-/// SHA-256 of the inflated, un-predicted `data`, streamed row by row so a
-/// large image never sits decoded in memory. `None` when the data does not
-/// decode cleanly (bad zlib data, an unknown PNG filter type, a truncated
-/// row); the caller then hashes the raw bytes — a mismatch at worst, never a
-/// collision.
+/// SHA-256 of the inflated, un-predicted `data`. `None` when it does not
+/// decode cleanly within [`MAX_INFLATED_BYTES`]; the caller then hashes the
+/// raw bytes — a mismatch at worst, never a collision.
 fn inflate_digest(data: &[u8], predictor: Predictor) -> Option<[u8; 32]> {
-    let mut decoder = flate2::read::ZlibDecoder::new(data);
     let mut hasher = Sha256::new();
+    inflate(data, predictor, MAX_INFLATED_BYTES, |bytes| {
+        hasher.update(bytes)
+    })?;
+    Some(hasher.finalize().into())
+}
+
+/// Inflate zlib `data` and undo `predictor`, handing decoded bytes to `sink`
+/// row by row, so a large image never sits decoded in memory. Stops with
+/// `None` once more than `limit` bytes have been inflated — the work is
+/// bounded by `limit`, not by how far the data expands — and on bad zlib
+/// data, an unknown PNG filter type or a truncated last row (which cannot be
+/// un-predicted the way another producer would have).
+fn inflate(
+    data: &[u8],
+    predictor: Predictor,
+    limit: usize,
+    mut sink: impl FnMut(&[u8]),
+) -> Option<()> {
+    let mut decoder = flate2::read::ZlibDecoder::new(data);
     let (row_len, prefix) = match predictor {
         Predictor::None => (0, 0),
         Predictor::Png { row, .. } => (row, 1),
@@ -1101,6 +1258,7 @@ fn inflate_digest(data: &[u8], predictor: Predictor) -> Option<[u8; 32]> {
     let mut previous = vec![0u8; row_len];
     let mut current = vec![0u8; row_len + prefix];
     let mut filled = 0usize;
+    let mut inflated = 0usize;
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = match decoder.read(&mut buffer) {
@@ -1109,8 +1267,12 @@ fn inflate_digest(data: &[u8], predictor: Predictor) -> Option<[u8; 32]> {
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return None,
         };
+        inflated += read;
+        if inflated > limit {
+            return None;
+        }
         if predictor == Predictor::None {
-            hasher.update(&buffer[..read]);
+            sink(&buffer[..read]);
             continue;
         }
         let mut chunk = &buffer[..read];
@@ -1121,15 +1283,58 @@ fn inflate_digest(data: &[u8], predictor: Predictor) -> Option<[u8; 32]> {
             chunk = &chunk[take..];
             if filled == current.len() {
                 unpredict_row(predictor, &mut current, &previous)?;
-                hasher.update(&current[prefix..]);
+                sink(&current[prefix..]);
                 previous.copy_from_slice(&current[prefix..]);
                 filled = 0;
             }
         }
     }
-    // A truncated last row cannot be un-predicted the way another producer
-    // would have; refuse rather than guess.
-    (filled == 0).then(|| hasher.finalize().into())
+    (filled == 0).then_some(())
+}
+
+/// Decode a content stream to at most `limit` bytes, or `None` (the caller
+/// then hashes it undecoded). Flate inflates incrementally and stops at the
+/// limit; the other filters decode in one pass, so each runs only when the
+/// worst-case expansion of its input fits the limit. Unknown filters and
+/// malformed filter entries also give `None`.
+fn decode_content(stream: &Stream, limit: usize) -> Option<Vec<u8>> {
+    if !stream.dict.has(b"Filter") {
+        return (stream.content.len() <= limit).then(|| stream.content.clone());
+    }
+    let filters = crate::filter::stream_filters(stream)?;
+    let params = stream.dict.get(b"DecodeParms").ok();
+    let mut data = Cow::Borrowed(stream.content.as_slice());
+    for (index, filter) in filters.iter().enumerate() {
+        let filter_params = crate::filter::decode_params_at(params, index);
+        let decoded = if filter.as_slice() == b"FlateDecode" {
+            let predictor = Predictor::from_params(filter_params)?;
+            let mut out = Vec::new();
+            inflate(&data, predictor, limit, |bytes| {
+                out.extend_from_slice(bytes)
+            })?;
+            out
+        } else {
+            let expansion = match filter.as_slice() {
+                b"ASCIIHexDecode" => 1,
+                // `z` stands for four zero bytes.
+                b"ASCII85Decode" => 4,
+                // A two-byte repeat run writes up to 128 bytes.
+                b"RunLengthDecode" => 64,
+                // A 9-bit code can stand for a 4096-byte string.
+                b"LZWDecode" => 4096,
+                _ => return None,
+            };
+            if data.len().saturating_mul(expansion) > limit {
+                return None;
+            }
+            crate::filter::decode_filter(filter, &data, filter_params).ok()?
+        };
+        if decoded.len() > limit {
+            return None;
+        }
+        data = Cow::Owned(decoded);
+    }
+    Some(data.into_owned())
 }
 
 /// Undo one row's prediction in place. `row` includes the PNG filter-type
@@ -1226,17 +1431,31 @@ fn feed_real(hasher: &mut Sha256, value: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_volatile_text;
+    use std::io::Write;
+
+    use lopdf::{dictionary, Stream};
+
+    use super::{decode_content, inflate, is_pje_document_number, is_pje_generated_by, Predictor};
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
 
     #[test]
     fn matches_pje_download_stamp_in_winansi_and_utf8() {
-        assert!(is_volatile_text(
+        assert!(is_pje_generated_by(
             b"Este documento foi gerado pelo usu\xe1rio 569.***.***-04 em 17/08/2026 13:43:50"
         ));
-        assert!(is_volatile_text(
+        assert!(is_pje_generated_by(
             "Este documento foi gerado pelo usuário 123.***.***-00 em 01/01/2025 00:00:00"
                 .as_bytes()
         ));
+        assert!(is_pje_document_number(
+            b"N\xfamero do documento: 26071613525300000000039184434"
+        ));
+        assert!(is_pje_document_number("Número do documento: 1".as_bytes()));
     }
 
     #[test]
@@ -1250,7 +1469,60 @@ mod tests {
             b"Num. 39526322 - P\xe1g. 1",
             b"Assinado eletronicamente por: FULANO - 16/07/2026 13:52:52",
         ] {
-            assert!(!is_volatile_text(text), "{}", String::from_utf8_lossy(text));
+            assert!(
+                !is_pje_generated_by(text),
+                "{}",
+                String::from_utf8_lossy(text)
+            );
         }
+        for text in [
+            b"N\xfamero do documento: ".as_slice(),
+            b"N\xfamero do documento: 123 ",
+            b"N\xfamero do documento: 12a",
+        ] {
+            assert!(
+                !is_pje_document_number(text),
+                "{}",
+                String::from_utf8_lossy(text)
+            );
+        }
+    }
+
+    #[test]
+    fn inflate_stops_past_the_limit() {
+        let data = zlib(&vec![0u8; 1024 * 1024]);
+        let mut total = 0usize;
+        assert!(
+            inflate(&data, Predictor::None, 1024 * 1024, |bytes| total +=
+                bytes.len())
+            .is_some()
+        );
+        assert_eq!(total, 1024 * 1024);
+        assert!(inflate(&data, Predictor::None, 1024, |_| {}).is_none());
+    }
+
+    #[test]
+    fn content_decoding_is_bounded_for_every_filter() {
+        let flate = Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            zlib(&vec![b' '; 100_000]),
+        );
+        assert_eq!(decode_content(&flate, 100_000).unwrap().len(), 100_000);
+        assert!(decode_content(&flate, 99_999).is_none());
+
+        // 2 bytes of RunLength can write 128: refused unless the worst case fits.
+        let run_length = Stream::new(
+            dictionary! { "Filter" => "RunLengthDecode" },
+            vec![129, b' ', 128],
+        );
+        assert_eq!(
+            decode_content(&run_length, 3 * 64).unwrap(),
+            vec![b' '; 128]
+        );
+        assert!(decode_content(&run_length, 3 * 64 - 1).is_none());
+
+        let unfiltered = Stream::new(dictionary! {}, b"q Q".to_vec());
+        assert!(decode_content(&unfiltered, 3).is_some());
+        assert!(decode_content(&unfiltered, 2).is_none());
     }
 }

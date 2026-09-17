@@ -233,14 +233,20 @@ built so that how a file stores a page does not matter:
 - things that are never drawn are left out: back-references, structure-tree
   indices, XMP metadata, modification dates, annotation names and link
   destinations/actions (a link into the document names a page number, which
-  shifts when the page moves);
+  shifts when the page moves). A form widget's value and appearance defaults
+  inherited from its parent field are drawn, so they are hashed;
 - known per-download stamps are masked: the PJe line `Este documento foi
   gerado pelo usuário … em dd/mm/yyyy hh:mm:ss` hashes as a placeholder, so
-  two downloads of the same case still match page for page.
+  two downloads of the same case still match page for page. The line is
+  masked only where the stamp draws it — alone in its own text object, on a
+  page that also draws the stamp's `Número do documento: …` line — so page
+  text quoting the sentence is hashed as it is.
 
 The contract is one-sided: equal fingerprints mean the pages draw the same;
 visually identical pages written differently (re-encoded JPEGs, re-subset
-fonts) can still differ. Compare fingerprints only within one `version`;
+fonts) can still differ. Work is bounded: decoded content is capped at
+128 MiB per page or form and inflated data at 512 MiB per stream; past a cap
+the bytes are hashed undecoded, which can only make equal pages differ. Compare fingerprints only within one `version`;
 any change to what is hashed bumps it.
 
 ### `pdq render` — rasterize to PNG

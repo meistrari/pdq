@@ -479,13 +479,30 @@ fn geometry_takes_part_with_equivalent_spellings_normalized() {
     assert_ne!(pages[0], pages[4]);
 }
 
-/// A PJe-style page: the download stamp strip plus a body line.
-fn pje_page(page_label: &str, stamp: Vec<u8>) -> PageBuilder {
+/// The stamp's document-number line; its presence is what makes a stamp line
+/// maskable.
+const DOCUMENT_NUMBER: &[u8] =
+    b"BT /F1 7 Tf 1 0 0 1 70 -28 Tm (N\xfamero do documento: 26071613525300000000039184434) Tj ET\n";
+
+const STAMP_A: &[u8] =
+    b"Este documento foi gerado pelo usu\xe1rio 569.***.***-04 em 17/08/2026 13:43:50";
+const STAMP_B: &[u8] =
+    b"Este documento foi gerado pelo usu\xe1rio 111.***.***-99 em 01/09/2026 08:07:06";
+
+/// A PJe-style page: the download stamp strip (page label, `stamp` in its own
+/// text object, optionally the document number) plus a body line.
+fn pje_page(page_label: &str, stamp: &[u8], document_number: bool) -> PageBuilder {
     let content = [
         b"BT /F1 9 Tf 1 0 0 1 490 -53 Tm (Num. 39526322 - P\xe1g. ".as_slice(),
         page_label.as_bytes(),
-        b") Tj ET\nBT /F1 7 Tf 1 0 0 1 70 -18 Tm ",
-        &stamp,
+        b") Tj ET\n",
+        if document_number {
+            DOCUMENT_NUMBER
+        } else {
+            b""
+        },
+        b"BT /F1 7 Tf 1 0 0 1 70 -18 Tm ",
+        stamp,
         b" ET\nBT /F1 12 Tf 72 700 Td (Corpo da peti\xe7\xe3o) Tj ET",
     ]
     .concat();
@@ -504,32 +521,24 @@ fn pje_download_stamp_is_masked_but_page_labels_are_not() {
         "pje.pdf",
         0,
         vec![
+            pje_page("1", &tj(STAMP_A), true),
+            pje_page("1", &tj(STAMP_B), true),
             pje_page(
                 "1",
-                tj(b"Este documento foi gerado pelo usu\xe1rio 569.***.***-04 em 17/08/2026 13:43:50"),
+                b"[(Este documento foi gerado pelo usu\xe1rio 222.***.***-00 ) -12 (em 02/09/2026 09:00:00)] TJ",
+                true,
             ),
-            pje_page(
-                "1",
-                tj(b"Este documento foi gerado pelo usu\xe1rio 111.***.***-99 em 01/09/2026 08:07:06"),
-            ),
-            pje_page(
-                "1",
-                b"[(Este documento foi gerado pelo usu\xe1rio 222.***.***-00 ) -12 (em 02/09/2026 09:00:00)] TJ"
-                    .to_vec(),
-            ),
-            pje_page(
-                "2",
-                tj(b"Este documento foi gerado pelo usu\xe1rio 569.***.***-04 em 17/08/2026 13:43:50"),
-            ),
+            pje_page("2", &tj(STAMP_A), true),
             // Not the stamp shape (no time): an ordinary string, not masked.
             pje_page(
                 "1",
-                tj(b"Este documento foi gerado pelo usu\xe1rio 569.***.***-04 em 17/08/2026"),
+                &tj(b"Este documento foi gerado pelo usu\xe1rio 569.***.***-04 em 17/08/2026"),
+                true,
             ),
             pje_page(
                 "1",
-                b"[(Este documento foi gerado pelo usu\xe1rio 333.***.***-11 ) -12 (em 03/09/2026 10:11:12)] TJ"
-                    .to_vec(),
+                b"[(Este documento foi gerado pelo usu\xe1rio 333.***.***-11 ) -12 (em 03/09/2026 10:11:12)] TJ",
+                true,
             ),
         ],
     );
@@ -539,6 +548,39 @@ fn pje_download_stamp_is_masked_but_page_labels_are_not() {
     assert_eq!(pages[2], pages[5], "the stamp shown through TJ");
     assert_ne!(pages[0], pages[3], "another page label");
     assert_ne!(pages[0], pages[4], "an unmasked string");
+}
+
+#[test]
+fn stamp_sentence_outside_the_stamp_is_not_masked() {
+    let dir = tempdir().unwrap();
+    // The sentence as body text: same text object as other text, with the
+    // document number present.
+    let in_paragraph = |stamp: &'static [u8]| -> PageBuilder {
+        let content = [
+            DOCUMENT_NUMBER,
+            b"BT /F1 12 Tf 72 700 Td (Certifico que:) Tj 0 -14 Td (".as_slice(),
+            stamp,
+            b") Tj ET",
+        ]
+        .concat();
+        text_page("F1", "Helvetica", content, false)
+    };
+    let path = build(
+        &dir,
+        "quoted.pdf",
+        0,
+        vec![
+            // No document-number line on the page.
+            pje_page("1", &tj(STAMP_A), false),
+            pje_page("1", &tj(STAMP_B), false),
+            in_paragraph(STAMP_A),
+            in_paragraph(STAMP_B),
+        ],
+    );
+
+    let pages = fingerprints(&path);
+    assert_ne!(pages[0], pages[1], "no document number: nothing is masked");
+    assert_ne!(pages[2], pages[3], "shown with other text: not masked");
 }
 
 fn form_page(
@@ -636,6 +678,157 @@ fn form_xobjects_resolve_their_own_names_and_inherit_the_callers() {
         pages[3], pages[4],
         "inherited names resolve to different fonts"
     );
+}
+
+/// A page with one widget annotation that has no appearance stream, whose
+/// parent field carries `value`.
+fn widget_page(value: &'static str) -> PageBuilder {
+    Box::new(move |document, _, _| {
+        let font = standard_font(document, "Helvetica");
+        let contents = document.add_object(content_stream(&hello("Form"), false));
+        let field_id = document.new_object_id();
+        let widget = document.add_object(dictionary! {
+            "Type" => "Annot",
+            "Subtype" => "Widget",
+            "Rect" => vec![10.into(), 10.into(), 200.into(), 30.into()],
+            "Parent" => field_id,
+        });
+        document.objects.insert(
+            field_id,
+            dictionary! {
+                "FT" => "Tx",
+                "T" => Object::string_literal(format!("name-{value}")),
+                "V" => Object::string_literal(value),
+                "DA" => Object::string_literal("/Helv 10 Tf 0 g"),
+                "Kids" => vec![widget.into()],
+            }
+            .into(),
+        );
+        dictionary! {
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+            "Contents" => contents,
+            "Annots" => vec![widget.into()],
+        }
+    })
+}
+
+#[test]
+fn widgets_hash_the_value_they_inherit_from_their_field() {
+    let dir = tempdir().unwrap();
+    let path = build(
+        &dir,
+        "widgets.pdf",
+        0,
+        vec![
+            widget_page("Alice"),
+            widget_page("Bob"),
+            widget_page("Alice"),
+        ],
+    );
+    let pages = fingerprints(&path);
+    assert_ne!(pages[0], pages[1], "the parent field's /V is drawn");
+    assert_eq!(pages[0], pages[2], "the field name /T is not");
+}
+
+/// A page whose content uses one resource of `category` under `name`.
+fn resource_page(
+    category: &'static str,
+    name: &'static str,
+    resource: fn() -> Object,
+    content: &'static str,
+) -> PageBuilder {
+    Box::new(move |document, _, _| {
+        let resource = document.add_object(resource());
+        let contents =
+            document.add_object(content_stream(content.replace("$", name).as_bytes(), true));
+        dictionary! {
+            "Resources" => dictionary! { category => dictionary! { name => resource } },
+            "Contents" => contents,
+        }
+    })
+}
+
+fn shading(end_color: f32) -> Object {
+    dictionary! {
+        "ShadingType" => 2,
+        "ColorSpace" => "DeviceRGB",
+        "Coords" => vec![0.into(), 0.into(), 100.into(), 0.into()],
+        "Function" => dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![1.into(), 0.into(), 0.into()],
+            "C1" => vec![0.into(), 0.into(), Object::Real(end_color)],
+            "N" => 1,
+        },
+    }
+    .into()
+}
+
+#[test]
+fn every_resource_operator_resolves_names_to_resources() {
+    struct Case {
+        category: &'static str,
+        content: &'static str,
+        resource: fn() -> Object,
+        different: fn() -> Object,
+    }
+    let cases = [
+        Case {
+            category: "ColorSpace",
+            content: "/$ cs /$ CS 0.5 sc 0.5 SC 0 0 10 10 re B",
+            resource: || {
+                vec!["CalGray".into(), dictionary! { "WhitePoint" => vec![Object::Real(0.9505), 1.into(), Object::Real(1.089)], "Gamma" => 1 }.into()].into()
+            },
+            different: || {
+                vec!["CalGray".into(), dictionary! { "WhitePoint" => vec![Object::Real(0.9505), 1.into(), Object::Real(1.089)], "Gamma" => Object::Real(2.2) }.into()].into()
+            },
+        },
+        Case {
+            category: "ExtGState",
+            content: "/$ gs 0 0 10 10 re f",
+            resource: || dictionary! { "Type" => "ExtGState", "ca" => Object::Real(0.5) }.into(),
+            different: || dictionary! { "Type" => "ExtGState", "ca" => Object::Real(0.7) }.into(),
+        },
+        Case {
+            category: "Pattern",
+            content: "/Pattern cs /$ scn /Pattern CS /$ SCN 0 0 10 10 re B",
+            resource: || dictionary! { "PatternType" => 2, "Shading" => shading(1.0) }.into(),
+            different: || dictionary! { "PatternType" => 2, "Shading" => shading(0.5) }.into(),
+        },
+        Case {
+            category: "Shading",
+            content: "/$ sh",
+            resource: || shading(1.0),
+            different: || shading(0.5),
+        },
+        Case {
+            category: "Properties",
+            content: "/OC /$ BDC 0 0 10 10 re f EMC /Mark /$ DP",
+            resource: || {
+                dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Layer A") }.into()
+            },
+            different: || {
+                dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Layer B") }.into()
+            },
+        },
+    ];
+
+    let dir = tempdir().unwrap();
+    for case in cases {
+        let path = build(
+            &dir,
+            &format!("{}.pdf", case.category),
+            0,
+            vec![
+                resource_page(case.category, "R0", case.resource, case.content),
+                resource_page(case.category, "Xi42", case.resource, case.content),
+                resource_page(case.category, "R0", case.different, case.content),
+            ],
+        );
+        let pages = fingerprints(&path);
+        assert_eq!(pages[0], pages[1], "{}: renamed resource", case.category);
+        assert_ne!(pages[0], pages[2], "{}: different resource", case.category);
+    }
 }
 
 #[test]
