@@ -219,7 +219,7 @@ only when they draw the same thing — so the same page can be recognized in
 another file, e.g. to drop pages repeated across overlapping downloads:
 
 ```json
-{"version":"pfp1","pages":[{"page":1,"fingerprint":"e0c153a9…"},{"page":2,"fingerprint":"2bb6497c…"}]}
+{"version":"pfp2","pages":[{"page":1,"fingerprint":"e0c153a9…"},{"page":2,"fingerprint":"2bb6497c…"}]}
 ```
 
 The hash covers everything drawn — the content stream operators, the fonts,
@@ -230,17 +230,19 @@ built so that how a file stores a page does not matter:
   content-stream layout (whitespace, comments, `/Contents` split into parts)
   are normalized away, and only resources the content actually uses count;
 - Flate compression and PNG/TIFF predictors are undone before hashing;
-- things that are never drawn are left out: back-references, structure-tree
+- bookkeeping in recognized dictionary types is left out: back-references, structure-tree
   indices, XMP metadata, modification dates, annotation names and link
   destinations/actions (a link into the document names a page number, which
   shifts when the page moves). A form widget's value and appearance defaults
-  inherited from its parent field are drawn, so they are hashed;
+  inherited from its parent field are drawn, so they are hashed. Matching
+  names in glyph or resource dictionaries always count;
 - known per-download stamps are masked: the PJe line `Este documento foi
   gerado pelo usuário … em dd/mm/yyyy hh:mm:ss` hashes as a placeholder, so
   two downloads of the same case still match page for page. The line is
-  masked only where the stamp draws it — alone in its own text object, on a
-  page that also draws the stamp's `Número do documento: …` line — so page
-  text quoting the sentence is hashed as it is.
+  masked only in the known footer layout: consecutive text objects using
+  the same 7-point font, at `(70, -18)` for the download line and `(70, -28)`
+  for `Número do documento: …`, before the page/form transform. Ambiguous
+  pairs and other layouts, including body quotations, stay in the hash.
 
 The contract is one-sided: equal fingerprints mean the pages draw the same;
 visually identical pages written differently (re-encoded JPEGs, re-subset

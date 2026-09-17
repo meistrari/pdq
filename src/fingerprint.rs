@@ -20,11 +20,16 @@
 //! - Flate compression and predictors — non-content streams hash their
 //!   inflated, un-predicted bytes.
 //!
-//! What never takes part: back-references (`/Parent`, an annotation's `/P`),
-//! structure-tree indices, XMP metadata, modification dates, annotation names
-//! and link destinations/actions. None of them is drawn. A widget's `/Parent`
-//! field is the exception in substance: the value and appearance defaults a
-//! viewer draws from it are hashed explicitly (see [`INHERITED_FIELD_KEYS`]).
+//! Bookkeeping is excluded only in recognized dictionary types: widget and
+//! annotation back-references, structure-tree indices, XMP metadata, edit
+//! dates, annotation names and link destinations/actions. The same keys in
+//! glyph and resource maps always count. A widget's `/Parent` field is
+//! the exception in substance: the value and appearance defaults a viewer
+//! draws from it are hashed explicitly (see [`INHERITED_FIELD_KEYS`]).
+//!
+//! What is document-relative on purpose: an optional content group hashes
+//! with its position in the catalog's `/OCGs` list, since two groups with
+//! equal dictionaries can still be switched on and off separately.
 //!
 //! Volatile stamps: some court systems stamp every page of a download with
 //! the downloading user and timestamp. Such a line hashes as a fixed
@@ -63,7 +68,7 @@ use crate::{
 
 /// Version of the serialization below. Fingerprints are only comparable
 /// within one version.
-pub const FINGERPRINT_VERSION: &str = "pfp1";
+pub const FINGERPRINT_VERSION: &str = "pfp2";
 
 /// Deepest object nesting followed before giving up on the page (matches the
 /// page-tree and copy depth caps elsewhere in the crate).
@@ -189,25 +194,19 @@ const TAG_VOLATILE: u8 = b'V';
 const TAG_BYTES_INFLATED: u8 = b'z';
 const TAG_BYTES_RAW: u8 = b'w';
 const TAG_FIELD: u8 = b'F';
+const TAG_OCG: u8 = b'G';
 
-/// Dictionary keys that are never drawn and vary between copies of the same
-/// page: back-references, structure indices, metadata, edit bookkeeping, and
-/// link destinations/actions — a link into the document points at a page
-/// NUMBER, which shifts whenever the page sits at another position.
-const SKIPPED_KEYS: [&[u8]; 12] = [
-    b"Parent",
-    b"StructParent",
-    b"StructParents",
-    b"Metadata",
-    b"PieceInfo",
-    b"LastModified",
-    b"NM",
-    b"M",
-    b"Dest",
-    b"A",
-    b"AA",
-    b"PA",
-];
+/// Keys skipped only in annotation dictionaries: the annotation name,
+/// modification date, and link destinations/actions — a link into the
+/// document points at a page NUMBER, which shifts whenever the page sits at
+/// another position. Elsewhere the same names are drawn content: a Type3
+/// `/CharProcs` glyph or a resource entry may be called `/A` or `/M`.
+const SKIPPED_ANNOTATION_KEYS: [&[u8]; 6] = [b"NM", b"M", b"Dest", b"A", b"AA", b"PA"];
+
+/// Colour-space resources that silently replace the device spaces `g`, `rg`,
+/// `k` and inline images select (ISO 32000-1 §8.6.5.6). No operand names
+/// them, so they take part in every content hash whenever they exist.
+const DEFAULT_COLOR_SPACES: [&[u8]; 3] = [b"DefaultCMYK", b"DefaultGray", b"DefaultRGB"];
 
 /// Field attributes a widget annotation inherits through `/Parent` (ISO
 /// 32000-1 §12.7.3) that decide what a viewer draws when it (re)generates the
@@ -220,18 +219,15 @@ const INHERITED_FIELD_KEYS: [&[u8]; 12] = [
 /// AcroForm entries a widget's appearance falls back to.
 const ACROFORM_DEFAULT_KEYS: [&[u8]; 4] = [b"DA", b"Q", b"DR", b"NeedAppearances"];
 
-/// Resource entries (name, value) kept for one category.
-type NamedEntries = Vec<(Vec<u8>, Object)>;
-
 /// `/Resources` categories a content stream can name an entry of.
-const RESOURCE_CATEGORIES: [&[u8]; 7] = [
-    b"ColorSpace",
-    b"ExtGState",
-    b"Font",
-    b"Pattern",
-    b"Properties",
-    b"Shading",
-    b"XObject",
+const RESOURCE_TYPES: [ResourceType; 7] = [
+    ResourceType::ColorSpace,
+    ResourceType::ExtGState,
+    ResourceType::Font,
+    ResourceType::Pattern,
+    ResourceType::Properties,
+    ResourceType::Shading,
+    ResourceType::XObject,
 ];
 
 /// Colour-space operands that name a built-in family rather than a
@@ -307,6 +303,13 @@ struct PageHasher<'s, S: ObjectSource> {
     memo: HashMap<ObjectId, Memo>,
     /// Objects currently being hashed, for cycle detection.
     stack: Vec<ObjectId>,
+    /// The catalog's `/OCProperties /OCGs` order, loaded on first use. Two
+    /// groups with equal dictionaries are still distinct groups — one may be
+    /// switched off — so a group hashes with its position in this list.
+    ocg_order: Option<Vec<ObjectId>>,
+    /// Attributes inherited from a page-tree node and its ancestors, by node
+    /// id, so a shared root is distilled once instead of loaded per page.
+    ancestors: HashMap<ObjectId, InheritedAttributes>,
 }
 
 impl<'s, S: ObjectSource> PageHasher<'s, S> {
@@ -320,7 +323,33 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
                 .collect(),
             memo: HashMap::new(),
             stack: Vec::new(),
+            ocg_order: None,
+            ancestors: HashMap::new(),
         }
+    }
+
+    /// Position of `id` in the catalog's `/OCGs` array, if listed.
+    fn ocg_index(&mut self, id: ObjectId) -> Result<Option<usize>> {
+        if self.ocg_order.is_none() {
+            let order = match self.catalog_entry(&[b"OCProperties", b"OCGs"])? {
+                Some(value) => match self.dereference(&value)? {
+                    Some(Object::Array(items)) => items
+                        .iter()
+                        .filter_map(|item| match item {
+                            Object::Reference(id) => Some(*id),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            self.ocg_order = Some(order);
+        }
+        Ok(self
+            .ocg_order
+            .as_ref()
+            .and_then(|order| order.iter().position(|entry| *entry == id)))
     }
 
     fn page(&mut self, page_id: ObjectId) -> Result<[u8; 32]> {
@@ -448,6 +477,7 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         contextual_resources: bool,
     ) -> Result<Flags> {
         let stripped = scan::strip_comments(data);
+        let mut flags = self.feed_default_color_spaces(hasher, resources)?;
         let operations = match Content::decode_strict(&stripped) {
             // lopdf drops an inline image it cannot size (unknown colour
             // space) and keeps an empty `BI`; its bytes would be lost.
@@ -460,7 +490,6 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
                 content.operations
             }
             _ => {
-                let mut flags = Flags::default();
                 feed_bytes(hasher, TAG_CONTENT_RAW, data);
                 flags.merge(self.feed_resources_named(hasher, resources, data)?);
                 flags.contextual |= contextual_resources;
@@ -468,7 +497,6 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             }
         };
 
-        let mut flags = Flags::default();
         let volatile = volatile_operands(&operations);
         hasher.update([TAG_CONTENT]);
         feed_len(hasher, operations.len());
@@ -495,6 +523,25 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         }
         // Names resolved against the caller's resources: not reusable.
         flags.contextual |= contextual_resources;
+        Ok(flags)
+    }
+
+    /// The [`DEFAULT_COLOR_SPACES`] entries of `resources`, present or not,
+    /// ahead of the content that draws with them.
+    fn feed_default_color_spaces(
+        &mut self,
+        hasher: &mut Sha256,
+        resources: Option<&Dictionary>,
+    ) -> Result<Flags> {
+        let color_spaces = match resources.and_then(|r| r.get(b"ColorSpace").ok()) {
+            Some(value) => self.resolve_dictionary(value)?,
+            None => None,
+        };
+        let mut flags = Flags::default();
+        for name in DEFAULT_COLOR_SPACES {
+            let value = color_spaces.as_ref().and_then(|d| d.get(name).ok());
+            flags.merge(self.feed_optional(hasher, value)?);
+        }
         Ok(flags)
     }
 
@@ -661,9 +708,9 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             return Ok(Flags::default());
         };
         let names = name_tokens(content);
-        let mut named: Vec<(&[u8], NamedEntries)> = Vec::new();
-        for category in RESOURCE_CATEGORIES {
-            let Some(entries) = (match resources.get(category) {
+        let mut named: Vec<(ResourceType, Vec<Vec<u8>>)> = Vec::new();
+        for resource_type in RESOURCE_TYPES {
+            let Some(entries) = (match resources.get(resource_type.dictionary_key()) {
                 Ok(value) => self.resolve_dictionary(value)?,
                 Err(_) => None,
             }) else {
@@ -672,26 +719,28 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             let mut used: Vec<_> = entries
                 .iter()
                 .filter(|(name, _)| names.contains(name.as_slice()))
-                .map(|(name, entry)| (name.clone(), entry.clone()))
+                .map(|(name, _)| name.clone())
                 .collect();
             // A category none of whose entries is named draws nothing.
             if used.is_empty() {
                 continue;
             }
-            used.sort_by(|a, b| a.0.cmp(&b.0));
-            named.push((category, used));
+            used.sort();
+            named.push((resource_type, used));
         }
 
+        // Each entry hashes the way a content operand naming it would, so a
+        // form without /Resources still draws with this dictionary.
         let mut flags = Flags::default();
         hasher.update([TAG_DICTIONARY]);
         feed_len(hasher, named.len());
-        for (category, used) in named {
-            feed_bytes(hasher, TAG_NAME, category);
+        for (resource_type, used) in named {
+            feed_bytes(hasher, TAG_NAME, resource_type.dictionary_key());
             hasher.update([TAG_DICTIONARY]);
             feed_len(hasher, used.len());
-            for (name, entry) in &used {
+            for name in &used {
                 feed_bytes(hasher, TAG_NAME, name);
-                flags.merge(self.feed_object(hasher, entry)?);
+                flags.merge(self.feed_resource(hasher, resource_type, name, Some(resources))?);
             }
         }
         Ok(flags)
@@ -784,18 +833,32 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             }
             Err(err) => return Err(err.into()),
         };
+        let mut optional_content_group = false;
         if let Ok(dictionary) = object.as_dict() {
-            if dictionary.get(b"Type").and_then(Object::as_name).ok() == Some(b"Page") {
-                // A page outside the page tree: its identity is unknowable
-                // and its content is not part of this page.
-                hasher.update([TAG_ORPHAN_PAGE]);
-                return Ok(Flags::default());
+            match dictionary.get(b"Type").and_then(Object::as_name).ok() {
+                Some(b"Page") => {
+                    // A page outside the page tree: its identity is
+                    // unknowable and its content is not part of this page.
+                    hasher.update([TAG_ORPHAN_PAGE]);
+                    return Ok(Flags::default());
+                }
+                Some(b"OCG") => optional_content_group = true,
+                _ => {}
             }
         }
 
         let position = self.stack.len();
         self.enter(id)?;
         let mut child = Sha256::new();
+        if optional_content_group {
+            match self.ocg_index(id)? {
+                Some(index) => {
+                    child.update([TAG_OCG]);
+                    feed_len(&mut child, index);
+                }
+                None => child.update([TAG_MISSING]),
+            }
+        }
         let result = self.feed_object(&mut child, &object);
         self.stack.pop();
         let mut flags = result?;
@@ -826,9 +889,30 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         dictionary: &Dictionary,
         skip_stream_keys: Option<&[&[u8]]>,
     ) -> Result<Flags> {
+        // Validate the values too: a /CharProcs map can have glyphs named
+        // /Subtype and /Rect, whose values are glyph streams, not a subtype
+        // name and a rectangle. /Type is optional on annotations.
+        let annotation = dictionary.get(b"Subtype").and_then(Object::as_name).is_ok()
+            && dictionary
+                .get(b"Rect")
+                .and_then(Object::as_array)
+                .is_ok_and(|rect| {
+                    rect.len() == 4
+                        && rect
+                            .iter()
+                            .all(|v| matches!(v, Object::Integer(_) | Object::Real(_)))
+                });
         let mut entries: Vec<_> = dictionary
             .iter()
-            .filter(|(key, value)| !self.skips_entry(key, value))
+            .filter(|(key, value)| {
+                !self.skips_entry(
+                    dictionary,
+                    key,
+                    value,
+                    annotation,
+                    skip_stream_keys.is_some(),
+                )
+            })
             .filter(|(key, _)| {
                 skip_stream_keys.is_none_or(|skipped| !skipped.contains(&key.as_slice()))
             })
@@ -850,7 +934,9 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             feed_bytes(hasher, TAG_NAME, key);
             flags.merge(self.feed_object(hasher, value)?);
         }
-        if dictionary.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Widget") {
+        if annotation
+            && dictionary.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Widget")
+        {
             flags.merge(self.feed_inherited_field(hasher, dictionary)?);
         }
         Ok(flags)
@@ -896,12 +982,36 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         Ok(flags)
     }
 
-    fn skips_entry(&self, key: &[u8], value: &Object) -> bool {
-        if SKIPPED_KEYS.contains(&key) {
-            return true;
+    fn skips_entry(
+        &self,
+        dictionary: &Dictionary,
+        key: &[u8],
+        value: &Object,
+        annotation: bool,
+        stream: bool,
+    ) -> bool {
+        let subtype = dictionary.get(b"Subtype").and_then(Object::as_name).ok();
+        if annotation {
+            return SKIPPED_ANNOTATION_KEYS.contains(&key)
+                || key == b"StructParent"
+                || (key == b"Parent" && subtype == Some(b"Widget"))
+                || (key == b"P"
+                    && matches!(value, Object::Reference(id) if self.page_numbers.contains_key(id)));
         }
-        // An annotation's /P points back at the page it sits on.
-        key == b"P" && matches!(value, Object::Reference(id) if self.page_numbers.contains_key(id))
+        // XObjects may omit /Type. Only stream dictionaries can be
+        // recognized this way; arbitrary resource and glyph maps retain
+        // every entry, including names that happen to be bookkeeping here.
+        if stream && matches!(subtype, Some(b"Form" | b"Image")) {
+            return key == b"Metadata"
+                || key == b"StructParent"
+                || key == b"StructParents"
+                || (subtype == Some(b"Form") && matches!(key, b"PieceInfo" | b"LastModified"));
+        }
+        key == b"Metadata"
+            && matches!(
+                dictionary.get(b"Type").and_then(Object::as_name).ok(),
+                Some(b"Font" | b"FontDescriptor")
+            )
     }
 
     /// Streams. Content streams (forms, tiling patterns) are canonicalized
@@ -1031,21 +1141,29 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
         Ok(Some(current))
     }
 
-    fn inherited_attributes(&self, page: &Dictionary) -> Result<InheritedAttributes> {
-        let mut attributes = InheritedAttributes {
-            resources: page.get(b"Resources").ok().cloned(),
-            media_box: page.get(b"MediaBox").ok().cloned(),
-            crop_box: page.get(b"CropBox").ok().cloned(),
-            rotate: page.get(b"Rotate").ok().cloned(),
-        };
-        let mut parent = page.get(b"Parent").ok().cloned();
-        let mut hops = 0usize;
-        while !attributes.complete() {
-            let Some(Object::Reference(id)) = parent else {
+    fn inherited_attributes(&mut self, page: &Dictionary) -> Result<InheritedAttributes> {
+        let mut attributes = InheritedAttributes::own(page);
+        if !attributes.complete() {
+            if let Ok(Object::Reference(parent)) = page.get(b"Parent") {
+                attributes.fill_from(&self.ancestor_attributes(*parent)?);
+            }
+        }
+        Ok(attributes)
+    }
+
+    /// The inheritable attributes a child of page-tree node `id` sees:
+    /// the node's own, with gaps filled from its ancestors. Walks up
+    /// iteratively to the nearest cached node, then caches every node passed.
+    fn ancestor_attributes(&mut self, id: ObjectId) -> Result<InheritedAttributes> {
+        let mut chain: Vec<(ObjectId, InheritedAttributes)> = Vec::new();
+        let mut next = Some(id);
+        let mut inherited = InheritedAttributes::default();
+        while let Some(id) = next {
+            if let Some(cached) = self.ancestors.get(&id) {
+                inherited = cached.clone();
                 break;
-            };
-            hops += 1;
-            if hops > MAX_CHAIN {
+            }
+            if chain.len() >= MAX_CHAIN || chain.iter().any(|(seen, _)| *seen == id) {
                 break;
             }
             let node = match self.source.get_object_value(id) {
@@ -1056,22 +1174,23 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             let Ok(node) = node.as_dict() else {
                 break;
             };
-            for (slot, key) in [
-                (&mut attributes.resources, b"Resources".as_slice()),
-                (&mut attributes.media_box, b"MediaBox"),
-                (&mut attributes.crop_box, b"CropBox"),
-                (&mut attributes.rotate, b"Rotate"),
-            ] {
-                if slot.is_none() {
-                    *slot = node.get(key).ok().cloned();
-                }
-            }
-            parent = node.get(b"Parent").ok().cloned();
+            let own = InheritedAttributes::own(node);
+            next = match node.get(b"Parent") {
+                Ok(Object::Reference(parent)) if !own.complete() => Some(*parent),
+                _ => None,
+            };
+            chain.push((id, own));
         }
-        Ok(attributes)
+        for (id, mut own) in chain.into_iter().rev() {
+            own.fill_from(&inherited);
+            self.ancestors.insert(id, own.clone());
+            inherited = own;
+        }
+        Ok(inherited)
     }
 }
 
+#[derive(Debug, Clone, Default)]
 struct InheritedAttributes {
     resources: Option<Object>,
     media_box: Option<Object>,
@@ -1080,11 +1199,34 @@ struct InheritedAttributes {
 }
 
 impl InheritedAttributes {
+    fn own(node: &Dictionary) -> Self {
+        Self {
+            resources: node.get(b"Resources").ok().cloned(),
+            media_box: node.get(b"MediaBox").ok().cloned(),
+            crop_box: node.get(b"CropBox").ok().cloned(),
+            rotate: node.get(b"Rotate").ok().cloned(),
+        }
+    }
+
     fn complete(&self) -> bool {
         self.resources.is_some()
             && self.media_box.is_some()
             && self.crop_box.is_some()
             && self.rotate.is_some()
+    }
+
+    /// Fill each missing attribute from `ancestor`.
+    fn fill_from(&mut self, ancestor: &Self) {
+        for (slot, value) in [
+            (&mut self.resources, &ancestor.resources),
+            (&mut self.media_box, &ancestor.media_box),
+            (&mut self.crop_box, &ancestor.crop_box),
+            (&mut self.rotate, &ancestor.rotate),
+        ] {
+            if slot.is_none() {
+                *slot = value.clone();
+            }
+        }
     }
 }
 
@@ -1128,50 +1270,92 @@ fn shown_text(operation: &Operation) -> Option<(usize, Cow<'_, [u8]>)> {
 
 /// Operands to mask as volatile stamps, keyed by operation index.
 ///
-/// Matching the sentence is not enough: page text can quote it, and masking a
-/// difference there would make distinct pages equal. A PJe download-stamp
-/// line is masked only where it is drawn the way the stamp draws it:
-/// - it is the only text shown in its own `BT … ET` text object, and
-/// - the same content also draws the stamp's document-number line
-///   (`Número do documento: <digits>`), which stays in the hash.
+/// Recognize only the known PJe footer layout: consecutive single-show text
+/// objects with the same explicit 7-point font and identity text matrices,
+/// at (70, -18) for the download line and (70, -28) for the document number.
+/// A page/form transform can place this strip, but no operations may change
+/// the graphics state between its lines. Other layouts remain unmasked.
 ///
-/// Two pages can then only collide on the masked line if they carry the same
-/// PJe document number and are otherwise identical — the same page from two
-/// downloads.
+/// Content order alone does not locate text: a body quotation may be emitted
+/// immediately before the footer. Multiple possible pairings are ambiguous
+/// too, so neither line in such a pairing is masked.
 fn volatile_operands(operations: &[Operation]) -> HashMap<usize, usize> {
-    let mut masked = HashMap::new();
-    let has_document_number = operations
-        .iter()
-        .filter_map(shown_text)
-        .any(|(_, text)| is_pje_document_number(&text));
-    if !has_document_number {
-        return masked;
+    struct Line<'a> {
+        font: &'a [u8],
+        stamp: bool,
+        operand: usize,
     }
 
-    let mut shown_in_block: Vec<usize> = Vec::new();
-    let mut in_text_object = false;
-    for (position, operation) in operations.iter().enumerate() {
-        match operation.operator.as_str() {
-            "BT" => {
-                in_text_object = true;
-                shown_in_block.clear();
-            }
-            "ET" => {
-                if let [only] = shown_in_block.as_slice() {
-                    if let Some((operand, text)) = shown_text(&operations[*only]) {
-                        if is_pje_generated_by(&text) {
-                            masked.insert(*only, operand);
-                        }
-                    }
-                }
-                in_text_object = false;
-                shown_in_block.clear();
-            }
-            "Tj" | "'" | "\"" | "TJ" if in_text_object => shown_in_block.push(position),
-            _ => {}
+    fn footer_line(operations: &[Operation]) -> Option<Line<'_>> {
+        let [begin, font, matrix, show, end] = operations else {
+            return None;
+        };
+        if begin.operator != "BT"
+            || !begin.operands.is_empty()
+            || font.operator != "Tf"
+            || matrix.operator != "Tm"
+            || !matches!(show.operator.as_str(), "Tj" | "TJ")
+            || show.operands.len() != 1
+            || end.operator != "ET"
+            || !end.operands.is_empty()
+        {
+            return None;
         }
+        let [Object::Name(font), size] = font.operands.as_slice() else {
+            return None;
+        };
+        if size.as_float().ok() != Some(7.0) {
+            return None;
+        }
+        let (operand, text) = shown_text(show)?;
+        let stamp = is_pje_generated_by(&text);
+        let y = if stamp {
+            -18.0
+        } else if is_pje_document_number(&text) {
+            -28.0
+        } else {
+            return None;
+        };
+        let expected = [1.0, 0.0, 0.0, 1.0, 70.0, y];
+        if matrix.operands.len() != expected.len()
+            || !matrix
+                .operands
+                .iter()
+                .zip(expected)
+                .all(|(value, expected)| value.as_float().ok() == Some(expected))
+        {
+            return None;
+        }
+        Some(Line {
+            font,
+            stamp,
+            operand,
+        })
     }
-    masked
+
+    let mut pairs = Vec::new();
+    let mut uses = HashMap::<usize, usize>::new();
+    for (start, pair) in operations.windows(10).enumerate() {
+        let (Some(first), Some(second)) = (footer_line(&pair[..5]), footer_line(&pair[5..])) else {
+            continue;
+        };
+        if first.font != second.font || first.stamp == second.stamp {
+            continue;
+        }
+        let (stamp, number, operand) = if first.stamp {
+            (start + 3, start + 8, first.operand)
+        } else {
+            (start + 8, start + 3, second.operand)
+        };
+        pairs.push((stamp, number, operand));
+        *uses.entry(stamp).or_default() += 1;
+        *uses.entry(number).or_default() += 1;
+    }
+    pairs
+        .into_iter()
+        .filter(|(stamp, number, _)| uses[stamp] == 1 && uses[number] == 1)
+        .map(|(stamp, _, operand)| (stamp, operand))
+        .collect()
 }
 
 /// PJe stamp: `Este documento foi gerado pelo usuário <user> em dd/mm/yyyy
@@ -1411,6 +1595,12 @@ fn decode_content(stream: &Stream, limit: usize) -> Option<Vec<u8>> {
     let mut data = Cow::Borrowed(stream.content.as_slice());
     for (index, filter) in filters.iter().enumerate() {
         let filter_params = crate::filter::decode_params_at(params, index);
+        // Parameters that are there but not readable here (an indirect
+        // reference) would decode as if absent: two streams with equal bytes
+        // but different predictors must not hash alike, so leave undecoded.
+        if filter_params.is_none() && !decode_params_absent(params, index) {
+            return None;
+        }
         let decoded = if filter.as_slice() == b"FlateDecode" {
             let predictor = Predictor::from_params(filter_params)?;
             let mut out = Vec::new();
@@ -1440,6 +1630,16 @@ fn decode_content(stream: &Stream, limit: usize) -> Option<Vec<u8>> {
         data = Cow::Owned(decoded);
     }
     Some(data.into_owned())
+}
+
+/// Whether filter `index` genuinely has no `/DecodeParms`: the entry is
+/// missing, `null`, or an array slot holding `null` (or none at all).
+fn decode_params_absent(params: Option<&Object>, index: usize) -> bool {
+    match params {
+        None | Some(Object::Null) => true,
+        Some(Object::Array(items)) => matches!(items.get(index), None | Some(Object::Null)),
+        Some(_) => false,
+    }
 }
 
 /// Undo one row's prediction in place. `row` includes the PNG filter-type

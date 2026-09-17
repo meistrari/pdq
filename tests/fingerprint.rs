@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     io::Write,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use assert_cmd::Command;
@@ -31,6 +33,18 @@ type PageBuilder = Box<dyn Fn(&mut Document, usize, &[ObjectId]) -> Dictionary>;
 /// Write a PDF built from `pages`. `padding` unrelated objects come first so
 /// the same page gets different object numbers in different documents.
 fn write_pdf(path: &Path, padding: usize, tree_attrs: Dictionary, pages: Vec<PageBuilder>) {
+    write_pdf_with_catalog(path, padding, tree_attrs, pages, &|_| Dictionary::new());
+}
+
+/// Like [`write_pdf`], with `catalog_attrs` (built after the pages) merged
+/// into the catalog.
+fn write_pdf_with_catalog(
+    path: &Path,
+    padding: usize,
+    tree_attrs: Dictionary,
+    pages: Vec<PageBuilder>,
+    catalog_attrs: &dyn Fn(&mut Document) -> Dictionary,
+) {
     let mut document = Document::with_version("1.7");
     for index in 0..padding {
         document.add_object(dictionary! { "Padding" => index as i64 });
@@ -50,7 +64,9 @@ fn write_pdf(path: &Path, padding: usize, tree_attrs: Dictionary, pages: Vec<Pag
     };
     tree.extend(&tree_attrs);
     document.objects.insert(pages_id, tree.into());
-    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    let mut catalog = dictionary! { "Type" => "Catalog", "Pages" => pages_id };
+    catalog.extend(&catalog_attrs(&mut document));
+    let catalog = document.add_object(catalog);
     document.trailer.set("Root", catalog);
     document
         .save(path)
@@ -565,6 +581,18 @@ fn stamp_sentence_outside_the_stamp_is_not_masked() {
         .concat();
         text_page("F1", "Helvetica", content, false)
     };
+    // The sentence as body text, one line per text object (as many
+    // producers draw), with the document number elsewhere on the page.
+    let own_block = |stamp: &'static [u8]| -> PageBuilder {
+        let content = [
+            DOCUMENT_NUMBER,
+            b"BT /F1 12 Tf 72 700 Td (Certifico que:) Tj ET\nBT /F1 12 Tf 72 686 Td (".as_slice(),
+            stamp,
+            b") Tj ET",
+        ]
+        .concat();
+        text_page("F1", "Helvetica", content, false)
+    };
     let path = build(
         &dir,
         "quoted.pdf",
@@ -575,12 +603,136 @@ fn stamp_sentence_outside_the_stamp_is_not_masked() {
             pje_page("1", &tj(STAMP_B), false),
             in_paragraph(STAMP_A),
             in_paragraph(STAMP_B),
+            own_block(STAMP_A),
+            own_block(STAMP_B),
         ],
     );
 
     let pages = fingerprints(&path);
     assert_ne!(pages[0], pages[1], "no document number: nothing is masked");
     assert_ne!(pages[2], pages[3], "shown with other text: not masked");
+    assert_ne!(
+        pages[4], pages[5],
+        "not next to the document number: not masked"
+    );
+}
+
+#[test]
+fn body_quotes_adjacent_to_the_footer_in_content_order_are_not_masked() {
+    let dir = tempdir().unwrap();
+    for (index, placement) in [
+        b"/F1 12 Tf 72 700 Td".as_slice(),
+        b"/F1 7 Tf 1 0 0 1 72 700 Tm",
+        b"/F1 12 Tf 1 0 0 1 70 -18 Tm",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let page = |quote: &[u8], download_stamp: &[u8]| {
+            text_page(
+                "F1",
+                "Helvetica",
+                [
+                    b"BT ".as_slice(),
+                    placement,
+                    b" (",
+                    quote,
+                    b") Tj ET\n",
+                    DOCUMENT_NUMBER,
+                    b"BT /F1 7 Tf 1 0 0 1 70 -18 Tm (",
+                    download_stamp,
+                    b") Tj ET",
+                ]
+                .concat(),
+                false,
+            )
+        };
+        let path = build(
+            &dir,
+            &format!("adjacent-quote-{index}.pdf"),
+            0,
+            vec![
+                page(STAMP_A, STAMP_A),
+                page(STAMP_B, STAMP_A),
+                page(STAMP_A, STAMP_B),
+            ],
+        );
+        let pages = fingerprints(&path);
+        assert_ne!(pages[0], pages[1], "a changed body quotation: {index}");
+        assert_eq!(pages[0], pages[2], "only the real stamp changed: {index}");
+    }
+}
+
+#[test]
+fn ambiguous_stamp_placement_is_not_masked() {
+    let dir = tempdir().unwrap();
+    for (index, between) in [b"q 1 0 0 1 0 700 cm\n".as_slice(), b"q\n"]
+        .iter()
+        .enumerate()
+    {
+        let page = |stamp: &[u8]| {
+            text_page(
+                "F1",
+                "Helvetica",
+                [
+                    DOCUMENT_NUMBER,
+                    between,
+                    b"BT /F1 7 Tf 1 0 0 1 70 -18 Tm (",
+                    stamp,
+                    b") Tj ET Q",
+                ]
+                .concat(),
+                false,
+            )
+        };
+        let path = build(
+            &dir,
+            &format!("ambiguous-stamp-{index}.pdf"),
+            0,
+            vec![page(STAMP_A), page(STAMP_B)],
+        );
+        let pages = fingerprints(&path);
+        assert_ne!(pages[0], pages[1], "graphics state changed between lines");
+    }
+}
+
+#[test]
+fn footer_lines_must_have_a_unique_partner() {
+    let dir = tempdir().unwrap();
+    let page = |stamp: &[u8], number_first: bool, ambiguous: bool| {
+        let stamp_line = [
+            b"BT /F1 7 Tf 1 0 0 1 70 -18 Tm (".as_slice(),
+            stamp,
+            b") Tj ET\n",
+        ]
+        .concat();
+        let mut content = if number_first {
+            [DOCUMENT_NUMBER, stamp_line.as_slice()].concat()
+        } else {
+            [stamp_line.as_slice(), DOCUMENT_NUMBER].concat()
+        };
+        if ambiguous {
+            content.extend_from_slice(&stamp_line);
+        }
+        text_page("F1", "Helvetica", content, false)
+    };
+    let path = build(
+        &dir,
+        "footer-pairs.pdf",
+        0,
+        vec![
+            page(STAMP_A, true, false),
+            page(STAMP_B, true, false),
+            page(STAMP_A, false, false),
+            page(STAMP_B, false, false),
+            page(STAMP_A, false, true),
+            page(STAMP_B, false, true),
+        ],
+    );
+    let pages = fingerprints(&path);
+    assert_eq!(pages[0], pages[1], "number before stamp");
+    assert_eq!(pages[2], pages[3], "number after stamp");
+    assert_ne!(pages[4], pages[5], "two candidates beside the same number");
 }
 
 fn form_page(
@@ -938,6 +1090,235 @@ fn split_and_merge_outputs_keep_page_fingerprints() {
 }
 
 #[test]
+fn optional_content_groups_keep_their_identity() {
+    // Two groups with equal dictionaries, one switched off by default: a page
+    // drawn under the hidden one is blank, the other is not.
+    let dir = tempdir().unwrap();
+    let groups: Rc<RefCell<Option<[ObjectId; 2]>>> = Rc::new(RefCell::new(None));
+    let layer = || dictionary! { "Type" => "OCG", "Name" => Object::string_literal("Layer") };
+    let page = |which: usize| -> PageBuilder {
+        let groups = Rc::clone(&groups);
+        Box::new(move |document, _, _| {
+            let ids = *groups.borrow_mut().get_or_insert_with(|| {
+                [document.add_object(layer()), document.add_object(layer())]
+            });
+            let contents =
+                document.add_object(content_stream(b"/OC /L0 BDC 0 0 10 10 re f EMC", false));
+            dictionary! {
+                "Resources" => dictionary! { "Properties" => dictionary! { "L0" => ids[which] } },
+                "Contents" => contents,
+            }
+        })
+    };
+    let path = dir.path().join("ocg.pdf");
+    write_pdf_with_catalog(
+        &path,
+        0,
+        Dictionary::new(),
+        vec![page(0), page(1), page(0)],
+        &|_| {
+            let ids = groups.borrow().unwrap();
+            dictionary! {
+                "OCProperties" => dictionary! {
+                    "OCGs" => vec![ids[0].into(), ids[1].into()],
+                    "D" => dictionary! { "OFF" => vec![ids[1].into()] },
+                },
+            }
+        },
+    );
+
+    let pages = fingerprints(&path);
+    assert_eq!(pages[0], pages[2], "the same group");
+    assert_ne!(pages[0], pages[1], "a hidden twin of the group");
+}
+
+#[test]
+fn default_color_spaces_take_part_without_being_named() {
+    let dir = tempdir().unwrap();
+    fn cal_rgb(gamma: f32) -> Object {
+        vec![
+            "CalRGB".into(),
+            dictionary! {
+                "WhitePoint" => vec![0.9505.into(), 1.0.into(), 1.089.into()],
+                "Gamma" => vec![gamma.into(), gamma.into(), gamma.into()],
+            }
+            .into(),
+        ]
+        .into()
+    }
+    let content = "1 0 0 rg 0 0 10 10 re f";
+    let path = build(
+        &dir,
+        "default-rgb.pdf",
+        0,
+        vec![
+            resource_page("ColorSpace", "DefaultRGB", || cal_rgb(1.8), content),
+            resource_page("ColorSpace", "DefaultRGB", || cal_rgb(2.2), content),
+            text_page("F1", "Helvetica", content.as_bytes().to_vec(), false),
+        ],
+    );
+    let pages = fingerprints(&path);
+    assert_ne!(pages[0], pages[1], "a different DefaultRGB");
+    assert_ne!(pages[0], pages[2], "no DefaultRGB at all");
+}
+
+/// A Type3 font whose encoded character A draws `glyph_name`.
+fn type3_page(glyph_name: &'static str, glyph: &'static [u8], indirect: bool) -> PageBuilder {
+    Box::new(move |document, _, _| {
+        let proc_ = document.add_object(Stream::new(Dictionary::new(), glyph.to_vec()));
+        // These are glyph names too, not annotation or type discriminators.
+        let empty = document.add_object(Stream::new(
+            Dictionary::new(),
+            b"1000 0 0 0 1000 1000 d1".to_vec(),
+        ));
+        let char_procs = dictionary! {
+            "Subtype" => empty, "Rect" => empty, "Type" => empty,
+            glyph_name => proc_,
+        };
+        let char_procs: Object = if indirect {
+            document.add_object(char_procs).into()
+        } else {
+            char_procs.into()
+        };
+        let font = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type3",
+            "FontBBox" => vec![0.into(), 0.into(), 1000.into(), 1000.into()],
+            "FontMatrix" => vec![0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into()],
+            "CharProcs" => char_procs,
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![65.into(), glyph_name.into()],
+            },
+            "FirstChar" => 65,
+            "LastChar" => 65,
+            "Widths" => vec![1000.into()],
+            "Resources" => dictionary! {},
+        });
+        let contents =
+            document.add_object(content_stream(b"BT /T3 24 Tf 72 700 Td (A) Tj ET", false));
+        dictionary! {
+            "Resources" => dictionary! { "Font" => dictionary! { "T3" => font } },
+            "Contents" => contents,
+        }
+    })
+}
+
+#[test]
+fn glyphs_named_like_bookkeeping_keys_still_count() {
+    let dir = tempdir().unwrap();
+    for name in [
+        "A",
+        "M",
+        "NM",
+        "Dest",
+        "AA",
+        "PA",
+        "Parent",
+        "StructParent",
+        "StructParents",
+        "Metadata",
+        "PieceInfo",
+        "LastModified",
+    ] {
+        for indirect in [false, true] {
+            let path = build(
+                &dir,
+                &format!("type3-{name}-{indirect}.pdf"),
+                0,
+                vec![
+                    type3_page(name, b"1000 0 0 0 1000 1000 d1 0 0 500 500 re f", indirect),
+                    type3_page(
+                        name,
+                        b"1000 0 0 0 1000 1000 d1 500 500 500 500 re f",
+                        indirect,
+                    ),
+                ],
+            );
+            let pages = fingerprints(&path);
+            assert_ne!(
+                pages[0], pages[1],
+                "the /{name} glyph is drawn (indirect={indirect})"
+            );
+        }
+    }
+}
+
+/// Unparseable page content drawing a form that has no `/Resources` and
+/// names `/F1` only inside itself; the page provides `/F1` as `base_font`.
+fn unparseable_page_with_inheriting_form(base_font: &'static str) -> PageBuilder {
+    Box::new(move |document, _, _| {
+        let font = standard_font(document, base_font);
+        let form = document.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![0.into(), 0.into(), 200.into(), 50.into()],
+            },
+            b"BT /F1 12 Tf 0 0 Td (Inside the form) Tj ET".to_vec(),
+        ));
+        let content = [
+            b"q BI /W 2 /H 2 /CS /ICCBased /BPC 8 ID\n".as_slice(),
+            &[0x7Fu8; 12],
+            b"\nEI Q /Fm1 Do",
+        ]
+        .concat();
+        let contents = document.add_object(content_stream(&content, false));
+        dictionary! {
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F1" => font },
+                "XObject" => dictionary! { "Fm1" => form },
+            },
+            "Contents" => contents,
+        }
+    })
+}
+
+#[test]
+fn unparseable_content_hashes_forms_with_the_callers_resources() {
+    let dir = tempdir().unwrap();
+    let path = build(
+        &dir,
+        "unparseable-form.pdf",
+        0,
+        vec![
+            unparseable_page_with_inheriting_form("Helvetica"),
+            unparseable_page_with_inheriting_form("Courier"),
+        ],
+    );
+    let pages = fingerprints(&path);
+    assert_ne!(pages[0], pages[1], "the form draws with the page's /F1");
+}
+
+#[test]
+fn indirect_decode_parameters_are_not_ignored() {
+    // Equal compressed bytes whose predictors differ only through an
+    // indirect /DecodeParms decode to different operators.
+    let dir = tempdir().unwrap();
+    let page = |params: Dictionary| -> PageBuilder {
+        Box::new(move |document, _, _| {
+            let params = document.add_object(params.clone());
+            let contents = document.add_object(Stream::new(
+                dictionary! { "Filter" => "FlateDecode", "DecodeParms" => params },
+                zlib(b"0 0 10 10 re f"),
+            ));
+            dictionary! { "Contents" => contents }
+        })
+    };
+    let path = build(
+        &dir,
+        "decode-parms.pdf",
+        0,
+        vec![
+            page(dictionary! { "Predictor" => 1 }),
+            page(dictionary! { "Predictor" => 12, "Columns" => 1 }),
+        ],
+    );
+    let pages = fingerprints(&path);
+    assert_ne!(pages[0], pages[1]);
+}
+
+#[test]
 fn fingerprint_cli_prints_versioned_json_for_selected_pages() {
     let output = pdq()
         .arg("fingerprint")
@@ -950,7 +1331,7 @@ fn fingerprint_cli_prints_versioned_json_for_selected_pages() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["version"], "pfp1");
+    assert_eq!(json["version"], "pfp2");
     let pages = json["pages"].as_array().unwrap();
     assert_eq!(
         pages
