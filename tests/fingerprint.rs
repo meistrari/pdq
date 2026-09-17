@@ -850,6 +850,54 @@ fn inline_image_the_parser_skips_still_distinguishes_pages() {
     assert_ne!(pages[0], pages[1]);
 }
 
+/// A page whose content lopdf cannot parse cleanly (an inline image with a
+/// colour space it cannot size) drawing text with `base_font`, optionally
+/// carrying a resource the content never names.
+fn unparseable_page(base_font: &'static str, unused_resource: bool) -> PageBuilder {
+    Box::new(move |document, _, _| {
+        let font = standard_font(document, base_font);
+        let content = [
+            b"q BI /W 2 /H 2 /CS /ICCBased /BPC 8 ID\n".as_slice(),
+            &[0x7Fu8; 12],
+            b"\nEI Q BT /F1 12 Tf 72 700 Td (Scanned) Tj ET",
+        ]
+        .concat();
+        let contents = document.add_object(content_stream(&content, false));
+        let mut resources = dictionary! { "Font" => dictionary! { "F1" => font } };
+        if unused_resource {
+            let template = document.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+                },
+                b"0 0 10 10 re f".to_vec(),
+            ));
+            resources.set("XObject", dictionary! { "TPL7" => template });
+        }
+        dictionary! { "Resources" => resources, "Contents" => contents }
+    })
+}
+
+#[test]
+fn unparseable_content_ignores_resources_it_never_names() {
+    let dir = tempdir().unwrap();
+    let path = build(
+        &dir,
+        "unparseable.pdf",
+        0,
+        vec![
+            unparseable_page("Helvetica", true),
+            // What `split` leaves after pruning the unused template.
+            unparseable_page("Helvetica", false),
+            unparseable_page("Courier", false),
+        ],
+    );
+    let pages = fingerprints(&path);
+    assert_eq!(pages[0], pages[1], "an unnamed resource is not drawn");
+    assert_ne!(pages[1], pages[2], "a named resource still is");
+}
+
 #[test]
 fn split_and_merge_outputs_keep_page_fingerprints() {
     let dir = tempdir().unwrap();

@@ -220,6 +220,20 @@ const INHERITED_FIELD_KEYS: [&[u8]; 12] = [
 /// AcroForm entries a widget's appearance falls back to.
 const ACROFORM_DEFAULT_KEYS: [&[u8]; 4] = [b"DA", b"Q", b"DR", b"NeedAppearances"];
 
+/// Resource entries (name, value) kept for one category.
+type NamedEntries = Vec<(Vec<u8>, Object)>;
+
+/// `/Resources` categories a content stream can name an entry of.
+const RESOURCE_CATEGORIES: [&[u8]; 7] = [
+    b"ColorSpace",
+    b"ExtGState",
+    b"Font",
+    b"Pattern",
+    b"Properties",
+    b"Shading",
+    b"XObject",
+];
+
 /// Colour-space operands that name a built-in family rather than a
 /// `/ColorSpace` resource (inline-image abbreviations included).
 const DEVICE_COLOR_SPACES: [&[u8]; 9] = [
@@ -448,7 +462,7 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             _ => {
                 let mut flags = Flags::default();
                 feed_bytes(hasher, TAG_CONTENT_RAW, data);
-                flags.merge(self.feed_resources_whole(hasher, resources)?);
+                flags.merge(self.feed_resources_named(hasher, resources, data)?);
                 flags.contextual |= contextual_resources;
                 return Ok(flags);
             }
@@ -627,6 +641,60 @@ impl<'s, S: ObjectSource> PageHasher<'s, S> {
             }
             other => self.feed_object(hasher, other),
         }
+    }
+
+    /// The resources raw `content` can name, for content that did not parse
+    /// cleanly: every entry of a resource category whose name appears as a
+    /// name token anywhere in the bytes (`#xx` escapes decoded). That is a
+    /// superset of what the content uses — a stray `/Name` inside inline-image
+    /// data only adds an entry — so it still pins every drawn resource, while
+    /// entries the content never mentions (the ones `split` prunes, or a
+    /// document-wide template catalog shared by every page) stay out.
+    fn feed_resources_named(
+        &mut self,
+        hasher: &mut Sha256,
+        resources: Option<&Dictionary>,
+        content: &[u8],
+    ) -> Result<Flags> {
+        let Some(resources) = resources else {
+            hasher.update([TAG_ABSENT]);
+            return Ok(Flags::default());
+        };
+        let names = name_tokens(content);
+        let mut named: Vec<(&[u8], NamedEntries)> = Vec::new();
+        for category in RESOURCE_CATEGORIES {
+            let Some(entries) = (match resources.get(category) {
+                Ok(value) => self.resolve_dictionary(value)?,
+                Err(_) => None,
+            }) else {
+                continue;
+            };
+            let mut used: Vec<_> = entries
+                .iter()
+                .filter(|(name, _)| names.contains(name.as_slice()))
+                .map(|(name, entry)| (name.clone(), entry.clone()))
+                .collect();
+            // A category none of whose entries is named draws nothing.
+            if used.is_empty() {
+                continue;
+            }
+            used.sort_by(|a, b| a.0.cmp(&b.0));
+            named.push((category, used));
+        }
+
+        let mut flags = Flags::default();
+        hasher.update([TAG_DICTIONARY]);
+        feed_len(hasher, named.len());
+        for (category, used) in named {
+            feed_bytes(hasher, TAG_NAME, category);
+            hasher.update([TAG_DICTIONARY]);
+            feed_len(hasher, used.len());
+            for (name, entry) in &used {
+                feed_bytes(hasher, TAG_NAME, name);
+                flags.merge(self.feed_object(hasher, entry)?);
+            }
+        }
+        Ok(flags)
     }
 
     /// Every entry of a resource dictionary, for paths that cannot tell which
@@ -1148,6 +1216,43 @@ fn is_pje_document_number(text: &[u8]) -> bool {
     !digits.is_empty() && digits.iter().all(u8::is_ascii_digit)
 }
 
+/// Every name token in raw content bytes, with `#xx` escapes decoded (ISO
+/// 32000-1 §7.3.5), so `/F#31` counts as `F1`.
+fn name_tokens(content: &[u8]) -> std::collections::HashSet<Vec<u8>> {
+    const DELIMITERS: &[u8] = b"()<>[]{}/%";
+    let mut names = std::collections::HashSet::new();
+    let mut index = 0;
+    while let Some(offset) = memchr::memchr(b'/', &content[index..]) {
+        let mut position = index + offset + 1;
+        let mut name = Vec::new();
+        while let Some(&byte) = content.get(position) {
+            if byte.is_ascii_whitespace() || byte == 0 || DELIMITERS.contains(&byte) {
+                break;
+            }
+            let escaped = (byte == b'#')
+                .then(|| content.get(position + 1..position + 3))
+                .flatten()
+                .and_then(|hex| std::str::from_utf8(hex).ok())
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            match escaped {
+                Some(decoded) => {
+                    name.push(decoded);
+                    position += 3;
+                }
+                None => {
+                    name.push(byte);
+                    position += 1;
+                }
+            }
+        }
+        if !name.is_empty() {
+            names.insert(name);
+        }
+        index = position.max(index + offset + 1);
+    }
+    names
+}
+
 fn is_content_stream(stream: &Stream) -> bool {
     stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Form")
         || matches!(stream.dict.get(b"PatternType"), Ok(Object::Integer(1)))
@@ -1438,8 +1543,8 @@ mod tests {
     use lopdf::{content::Operation, Object};
 
     use super::{
-        decode_content, inflate, is_pje_document_number, is_pje_generated_by, resource_operand,
-        Predictor, ResourceType,
+        decode_content, inflate, is_pje_document_number, is_pje_generated_by, name_tokens,
+        resource_operand, Predictor, ResourceType,
     };
 
     fn zlib(data: &[u8]) -> Vec<u8> {
@@ -1527,6 +1632,20 @@ mod tests {
                 op.operands
             );
         }
+    }
+
+    #[test]
+    fn name_tokens_decode_escapes_and_stop_at_delimiters() {
+        let names = name_tokens(b"q /F#31 12 Tf/Im0 Do[/CS0]<</Pat#20A 1>>/ BI /W 2 ID \x00/Z EI");
+        for expected in [&b"F1"[..], b"Im0", b"CS0", b"Pat A", b"W", b"Z"] {
+            assert!(
+                names.contains(expected),
+                "{}",
+                String::from_utf8_lossy(expected)
+            );
+        }
+        assert!(!names.contains(&b"F#31"[..]));
+        assert!(!names.contains(&b""[..]));
     }
 
     #[test]
