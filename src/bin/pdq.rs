@@ -24,6 +24,8 @@ enum Command {
     PageCount(PageCountArgs),
     /// Print each page's size in PDF points and rotation as JSON, without rendering
     Dimensions(DimensionsArgs),
+    /// Print a content fingerprint per page as JSON (equal only for pages that draw the same)
+    Fingerprint(FingerprintArgs),
     #[cfg(feature = "render")]
     Render(RenderArgs),
     /// Extract positioned text runs as JSON (points at 72 dpi, top-left origin)
@@ -95,6 +97,19 @@ struct PageCountArgs {
 #[derive(Debug, Args)]
 struct DimensionsArgs {
     input: PathBuf,
+
+    /// Password for encrypted inputs
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct FingerprintArgs {
+    input: PathBuf,
+
+    /// Page ranges to fingerprint (same syntax as render); all pages when omitted
+    #[arg(long, value_name = "RANGES")]
+    pages: Option<String>,
 
     /// Password for encrypted inputs
     #[arg(long, value_name = "PASSWORD")]
@@ -186,6 +201,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Dimensions(args) => {
             let pages = page_dimensions_with_password(&args.input, args.password.as_deref())?;
             println!("{}", dimensions_json(&pages));
+        }
+        Command::Fingerprint(args) => {
+            let options = pdq::FingerprintOptions {
+                pages: args.pages.map(PageRangeGroup::parse).transpose()?,
+                password: args.password,
+            };
+            let pages = pdq::fingerprint_pages(&args.input, &options)?;
+            println!("{}", pdq::fingerprints_to_json(&pages));
         }
         #[cfg(feature = "render")]
         Command::Render(args) => {
