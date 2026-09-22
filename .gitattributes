@@ -1,0 +1,2 @@
+# Preserve upstream formatting, including literal PDF xref rows in tests.
+vendor/lopdf/** linguist-vendored whitespace=-blank-at-eol
