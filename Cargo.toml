@@ -45,6 +45,9 @@ tempfile = "3.23.0"
 # Fork branch: agl-glyph-names-0.7 = tint-transform-lut-0.7 + the AGL fix
 # (based on hayro-interpret-v0.7.0).
 [patch.crates-io]
+# lopdf 0.43.0 drops streams with indentation before endstream.
+# Keep the upstream source plus the boundary fix documented in vendor/lopdf/PATCHES.md.
+lopdf = { path = "vendor/lopdf" }
 hayro-interpret = { git = "https://github.com/Guiqft/hayro", branch = "agl-glyph-names-0.7" }
 # Carry a patched hayro until the tiling-pattern fix lands upstream (issue
 # LaurenzV/hayro#404): the tile pixmap was sized from XStep/YStep alone, so

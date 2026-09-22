@@ -59,6 +59,11 @@ To use pdq as a library, add it to your project:
 cargo add pdq
 ```
 
+The prebuilt binaries and a source build also carry a local lopdf stream-boundary
+fix: indented `endstream` markers no longer cause drawing commands to be lost
+during splitting. See [the patch notes](vendor/lopdf/PATCHES.md). As with the
+hayro patches below, crates.io installs do not include this dependency patch.
+
 The prebuilt binaries and a source build carry two fixes to hayro's
 interpreter that are still making their way upstream: memoized tint
 transforms (much faster `render` on Separation/DeviceN images) and AGL-spec

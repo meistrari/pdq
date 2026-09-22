@@ -2077,3 +2077,120 @@ fn split_keeps_field_value_via_widget_parent_but_drops_field_kids() {
 
     QpdfValidator::detect().validate(&output, 1);
 }
+
+#[test]
+fn split_preserves_streams_with_indented_endstream() {
+    let temp = tempdir().unwrap();
+    let content = b"q\n1 0 0 rg\n10 10 40 40 re f\nQ\n \t";
+    for (index, separator) in [b"\r\n\t".as_slice(), b"\n  ", b"\r\n\t \x00\x0c"]
+        .iter()
+        .enumerate()
+    {
+        for indirect_length in [false, true] {
+            let input = temp
+                .path()
+                .join(format!("input-{index}-{indirect_length}.pdf"));
+            let mut pdf = b"%PDF-1.4\n".to_vec();
+            let mut offsets = vec![0];
+            for (id, body) in [
+                (1, "<< /Type /Catalog /Pages 2 0 R >>"),
+                (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources <<>> /Contents 4 0 R >>"),
+            ] {
+                offsets.push(pdf.len());
+                writeln!(pdf, "{id} 0 obj\n{body}\nendobj").unwrap();
+            }
+            offsets.push(pdf.len());
+            let length = if indirect_length {
+                "5 0 R".to_string()
+            } else {
+                content.len().to_string()
+            };
+            write!(pdf, "4 0 obj\n<< /Length {length} >>\nstream\n").unwrap();
+            pdf.extend_from_slice(content);
+            pdf.extend_from_slice(separator);
+            pdf.extend_from_slice(b"endstream\nendobj\n");
+            if indirect_length {
+                offsets.push(pdf.len());
+                writeln!(pdf, "5 0 obj\n{}\nendobj", content.len()).unwrap();
+            }
+            let xref = pdf.len();
+            writeln!(pdf, "xref\n0 {}\n0000000000 65535 f ", offsets.len()).unwrap();
+            for offset in &offsets[1..] {
+                writeln!(pdf, "{offset:010} 00000 n ").unwrap();
+            }
+            writeln!(
+                pdf,
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF",
+                offsets.len()
+            )
+            .unwrap();
+            fs::write(&input, pdf).unwrap();
+
+            let pattern = temp.path().join("page-%d.pdf");
+            split_pages(&input, pattern.to_str().unwrap()).unwrap();
+            let output = temp.path().join("page-1.pdf");
+            let document = Document::load(&output).unwrap();
+            let page = document.get_pages()[&1];
+            let stream = document
+                .get_object(document.get_page_contents(page)[0])
+                .unwrap()
+                .as_stream()
+                .unwrap();
+            assert_eq!(stream.get_plain_content().unwrap(), content,
+                "drawing stream lost for separator {separator:?}, indirect length {indirect_length}");
+
+            // Multiple outputs use the eager loader rather than split-pages' lazy reader.
+            let eager = temp.path().join("eager.pdf");
+            split(
+                &input,
+                &[
+                    SplitOutput {
+                        range: PageRangeGroup::parse("1").unwrap(),
+                        path: eager.clone(),
+                    },
+                    SplitOutput {
+                        range: PageRangeGroup::parse("1").unwrap(),
+                        path: temp.path().join("second.pdf"),
+                    },
+                ],
+            )
+            .unwrap();
+            let document = Document::load(&eager).unwrap();
+            assert_eq!(
+                document
+                    .get_object(document.get_page_contents(document.get_pages()[&1])[0])
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+                    .get_plain_content()
+                    .unwrap(),
+                content
+            );
+
+            #[cfg(feature = "render")]
+            {
+                let options = pdq::RenderOptions {
+                    dpi: 72.0,
+                    pages: None,
+                };
+                pdq::render_pages(
+                    &input,
+                    temp.path().join("before-%d.png").to_str().unwrap(),
+                    &options,
+                )
+                .unwrap();
+                pdq::render_pages(
+                    &output,
+                    temp.path().join("after-%d.png").to_str().unwrap(),
+                    &options,
+                )
+                .unwrap();
+                assert_eq!(
+                    fs::read(temp.path().join("before-1.png")).unwrap(),
+                    fs::read(temp.path().join("after-1.png")).unwrap()
+                );
+            }
+        }
+    }
+}
