@@ -239,24 +239,27 @@ fn collect_form_names(
 
 fn scan_names(data: &[u8]) -> Option<UsedNames> {
     let data = strip_comments(data);
-    let content = Content::decode_strict(&data).ok()?;
     let mut used = UsedNames::default();
-    let mut last_name: Option<&[u8]> = None;
+    let mut last_name: Option<Vec<u8>> = None;
 
-    for operation in &content.operations {
-        for operand in &operation.operands {
+    // Visit operations one at a time: collecting them first costs ~30x the
+    // decoded stream size, which turned EMF-converted vector forms (tens of
+    // MB of path operators) into multi-GB allocations.
+    Content::decode_strict_for_each(&data, |operation| {
+        for operand in operation.operands {
             if let Object::Name(name) = operand {
                 last_name = Some(name);
             }
         }
         let Some(resource_type) = resource_type_for_operator(&operation.operator) else {
-            continue;
+            return;
         };
-        let Some(name) = last_name else {
-            continue;
+        let Some(name) = &last_name else {
+            return;
         };
         used.insert(resource_type, name);
-    }
+    })
+    .ok()?;
 
     Some(used)
 }
@@ -580,6 +583,52 @@ mod tests {
     #[test]
     fn strict_scan_rejects_trailing_invalid_content() {
         assert!(scan_names(b"/TPL0 Do @@@").is_none());
+    }
+
+    #[test]
+    fn streaming_decode_matches_collected_decode() {
+        use lopdf::content::Content;
+
+        let cases: &[&[u8]] = &[
+            b"",
+            b"  \n",
+            b"q 1 0 0 1 10 10 cm /Im0 Do Q",
+            b"% leading\nq /F1 12 Tf BT (a) Tj ET Q % trailing\n",
+            b"/P <</MCID 0>> BDC [(x) 2 (y)] TJ EMC",
+            b"BI /W 2 /H 1 /CS /G /BPC 8 ID \x00\xFF EI Q",
+            b"q 1 0 0 1 10 10 cm (corrupted Q",
+            b"/F1 12 Tf @@@",
+            b"q ] Q",
+        ];
+        for data in cases {
+            let collected = Content::decode_strict(data)
+                .map(|content| format!("{:?}", content.operations))
+                .ok();
+            let mut visited = Vec::new();
+            let streamed = Content::decode_strict_for_each(data, |op| visited.push(op))
+                .map(|()| format!("{visited:?}"))
+                .ok();
+            assert_eq!(
+                collected,
+                streamed,
+                "diverged on {:?}",
+                String::from_utf8_lossy(data)
+            );
+        }
+    }
+
+    #[test]
+    fn scans_large_vector_form_names() {
+        // EMF-converted forms carry tens of MB of path operators; the scan
+        // must still find the resource names around them.
+        let mut data = b"/GS8 gs\n".to_vec();
+        for i in 0..200_000 {
+            data.extend_from_slice(format!("{i} {i} m {i} 1 l S\n").as_bytes());
+        }
+        data.extend_from_slice(b"/Image12 Do\n");
+        let used = scan_names(&data).unwrap();
+        assert!(used.contains(b"GS8"));
+        assert!(used.contains(b"Image12"));
     }
 
     #[test]
