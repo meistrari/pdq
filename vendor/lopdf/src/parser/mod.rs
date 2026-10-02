@@ -739,6 +739,39 @@ pub fn content_strict(input: ParserInput) -> Result<Content<Vec<Operation>>, err
     Ok(content)
 }
 
+/// Streaming twin of [`content_strict`]: same grammar and the same accept /
+/// reject decisions, but each operation is handed to `visit` and dropped
+/// instead of being collected. Peak memory is one operation rather than the
+/// whole operation list — a 55 MB vector-graphics form otherwise expands into
+/// ~1.7 GB of `Operation`/`Object` values.
+pub fn content_strict_for_each(
+    input: ParserInput, mut visit: impl FnMut(Operation),
+) -> Result<(), error::ParseError> {
+    let invalid = |_| error::ParseError::InvalidContentStream;
+    let (mut input, _) = content_space(input).map_err(invalid)?;
+    // Mirrors `many0(operation)`: a recoverable error ends the sequence, a
+    // failure (`cut`) rejects the stream, and a match that consumes nothing
+    // is an error (nom's infinite-loop guard).
+    loop {
+        match operation(input) {
+            Ok((rest, op)) => {
+                if rest.len() == input.len() {
+                    return Err(error::ParseError::InvalidContentStream);
+                }
+                visit(op);
+                input = rest;
+            }
+            Err(nom::Err::Error(_)) => break,
+            Err(_) => return Err(error::ParseError::InvalidContentStream),
+        }
+    }
+    let (rest, _) = many0(terminated(comment, content_space)).parse(input).map_err(invalid)?;
+    if !rest.is_empty() {
+        return Err(error::ParseError::InvalidContentStream);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

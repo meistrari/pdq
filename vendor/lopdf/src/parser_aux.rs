@@ -25,6 +25,13 @@ impl Content<Vec<Operation>> {
     pub fn decode_strict(data: &[u8]) -> Result<Self> {
         parser::content_strict(data).map_err(|e| e.into())
     }
+
+    /// Like [`Content::decode_strict`], but visits each operation as it is
+    /// parsed instead of collecting them, so memory stays bounded by a single
+    /// operation regardless of stream size.
+    pub fn decode_strict_for_each(data: &[u8], visit: impl FnMut(Operation)) -> Result<()> {
+        parser::content_strict_for_each(data, visit).map_err(|e| e.into())
+    }
 }
 
 impl Stream {
