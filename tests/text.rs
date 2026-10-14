@@ -302,6 +302,91 @@ fn algorithmic_glyph_names_resolve_without_tounicode() {
     );
 }
 
+/// Guards the Type3 glyph-name mapping in the hayro-interpret patch: with no
+/// ToUnicode, a Type3 glyph now resolves through its /Differences name like
+/// an outline font's, including names that spell their own code (`/C41`),
+/// as some producers write them. Skipped from an unpacked
+/// release, like `algorithmic_glyph_names_resolve_without_tounicode`.
+#[test]
+fn type3_glyphs_named_after_their_code_resolve_without_tounicode() {
+    if is_packaged_crate() {
+        eprintln!("skipping: the published crate builds without the hayro patch");
+        return;
+    }
+
+    let pages = extract_all("text-type3-numeric-names.pdf");
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+
+    let letters: String = run_texts(&pages)
+        .concat()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(letters, "ABBA");
+    assert!(
+        !page.degraded,
+        "every glyph name spells its own code, so the page must not be degraded"
+    );
+}
+
+/// With `type3-metrics`, a Type3 font whose em is a fraction of what it draws
+/// (`/FontMatrix [1 0 0 1 0 0]`, 0.2 Tf, a 33-unit `/FontBBox`) reads as one
+/// run sized by its bbox, with the `/Widths` advances deciding word gaps —
+/// instead of one run per glyph at a 0.2 pt font size.
+#[cfg(feature = "type3-metrics")]
+#[test]
+fn type3_runs_use_widths_and_bbox_height() {
+    let pages = extract_all("text-type3-numeric-names.pdf");
+    let runs = &pages[0].runs;
+
+    assert_eq!(runs.len(), 1, "runs: {runs:?}");
+    let run = &runs[0];
+    assert_eq!(run.text, "AB BA");
+    // 33 glyph units at 0.2 pt each.
+    assert!(
+        (run.font_size - 6.6).abs() < 0.01,
+        "font_size {}",
+        run.font_size
+    );
+    // Five 25-unit advances at 0.2 pt each.
+    assert!((run.width - 25.0).abs() < 0.01, "width {}", run.width);
+}
+
+#[cfg(feature = "type3-metrics")]
+#[test]
+fn type3_bbox_padding_does_not_merge_lines() {
+    for (suffix, scale) in [("", 1.0), ("-small", 0.25), ("-large", 4.0)] {
+        let filename = format!("text-type3-padded-bbox{suffix}.pdf");
+        let pages = extract_all(&filename);
+        assert_eq!(run_texts(&pages), ["AB", "BA"], "{filename}");
+        assert!(!pages[0].degraded, "{filename}");
+        for run in &pages[0].runs {
+            assert!(
+                (run.font_size - 10.0 * scale).abs() < 0.01,
+                "{filename}: {run:?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "type3-metrics")]
+#[test]
+fn type3_horizontal_shear_does_not_merge_lines() {
+    for (suffix, scale) in [("", 1.0), ("-small", 0.25), ("-large", 4.0)] {
+        let filename = format!("text-type3-shear{suffix}.pdf");
+        let pages = extract_all(&filename);
+        assert_eq!(run_texts(&pages), ["AB", "BA"], "{filename}");
+        assert!(!pages[0].degraded, "{filename}");
+        for run in &pages[0].runs {
+            assert!(
+                (run.font_size - 6.6 * scale).abs() < 0.01,
+                "{filename}: {run:?}"
+            );
+        }
+    }
+}
+
 /// The default must extract appearance-stream text, and it must do so through
 /// `ExtractTextOptions::default()` specifically: a derived `Default` would
 /// leave the flag `false` and silently reinstate the data loss for every

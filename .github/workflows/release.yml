@@ -30,8 +30,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
+      - name: Run tests with default features
         run: cargo test --all-targets
+
+      # The release binaries are built with type3-metrics.
+      - name: Run text tests with Type3 metrics
+        run: cargo test --features type3-metrics --lib --test text
 
   build:
     name: Build (${{ matrix.target }})
@@ -67,7 +71,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --bin pdq --target ${{ matrix.target }}
+        run: cargo build --release --bin pdq --features type3-metrics --target ${{ matrix.target }}
 
       - name: Package
         shell: bash

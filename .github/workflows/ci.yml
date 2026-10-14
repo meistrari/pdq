@@ -27,6 +27,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy with Type3 metrics
+        run: cargo clippy --all-targets --features type3-metrics -- -D warnings
+
       - name: Check without default features
         run: cargo check --no-default-features --all-targets
 
@@ -53,8 +56,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
+      - name: Run tests with default features
         run: cargo test --all-targets
 
+      # The feature only changes `pdq text`; the library and text suites are
+      # what it can reach.
+      - name: Run text tests with Type3 metrics
+        run: cargo test --features type3-metrics --lib --test text
+
       - name: Build release binary
-        run: cargo build --release --bin pdq
+        run: cargo build --release --bin pdq --features type3-metrics

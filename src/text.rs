@@ -301,10 +301,10 @@ impl TextDevice {
         }
         let (reference, gap_range, has_advance) = match current.expected {
             Some(expected) => (expected, (-0.25, WORD_GAP_MAX), true),
-            // Without advance metrics (Type3 fonts), measure from the
-            // previous origin and accept anything up to a wide glyph plus
-            // a word gap; the glyph width is indistinguishable from the
-            // gap, so no space can be synthesized.
+            // Without advance metrics (Type3 fonts, unless built with
+            // `type3-metrics`), measure from the previous origin and accept
+            // anything up to a wide glyph plus a word gap; the glyph width is
+            // indistinguishable from the gap, so no space can be synthesized.
             None => (current.last_origin, (-0.05, 1.6), false),
         };
         let delta = origin - reference;
@@ -330,15 +330,17 @@ impl<'a> Device<'a> for TextDevice {
         let origin = to_device * Point::ZERO;
         let em_x = to_device * Point::new(FONT_UNITS_PER_EM, 0.0) - origin;
         let em_y = to_device * Point::new(0.0, FONT_UNITS_PER_EM) - origin;
-        let font_size = em_y.hypot();
+        let em_size = em_y.hypot();
         if !origin.x.is_finite()
             || !origin.y.is_finite()
-            || !font_size.is_finite()
-            || font_size <= 0.0
+            || !em_size.is_finite()
+            || em_size <= 0.0
             || em_x.hypot() <= 0.0
         {
             return;
         }
+        let up = em_y / em_size;
+        let font_size = type3_drawn_size(glyph, to_device, up, em_size).unwrap_or(em_size);
 
         // FillStroke rendering modes draw the same glyph twice; keep only
         // the fill pass. Stroke-only text still comes through because no
@@ -360,14 +362,9 @@ impl<'a> Device<'a> for TextDevice {
             }
         };
 
-        let up = em_y / font_size;
         let dir = em_x.normalize();
-        let advance = match glyph {
-            Glyph::Outline(outline) => outline
-                .advance_width()
-                .map(|w| to_device * Point::new(w as f64, 0.0) - origin),
-            Glyph::Type3(_) => None,
-        };
+        let advance =
+            glyph_advance_width(glyph).map(|w| to_device * Point::new(w as f64, 0.0) - origin);
         let expected = advance.map(|a| origin + a);
         // Without an advance, estimate the glyph's extent as half an em so
         // the box still covers most of the final glyph.
@@ -408,6 +405,72 @@ impl<'a> Device<'a> for TextDevice {
     fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
+}
+
+/// The glyph's advance width in font units (thousandths of an em), when known.
+fn glyph_advance_width(glyph: &Glyph<'_>) -> Option<f32> {
+    match glyph {
+        Glyph::Outline(outline) => outline.advance_width(),
+        #[cfg(feature = "type3-metrics")]
+        // A Type3 font with no `/Widths` entry for the code reports 0, which
+        // is "unknown" here rather than "the next glyph overprints this one".
+        Glyph::Type3(type3) => type3.advance_width().filter(|width| *width > 0.0),
+        #[cfg(not(feature = "type3-metrics"))]
+        Glyph::Type3(_) => None,
+    }
+}
+
+/// A compatibility estimate for Type3 fonts that use `Tf` as a small scale
+/// factor rather than a useful em size.
+///
+/// Keep the nominal em for design grids with at least ten units per em.
+/// Only coarser grids may use the bbox, and only when it exceeds two ems.
+/// This is deliberately a conservative heuristic: a non-default matrix
+/// alone does not make a possibly padded `/FontBBox` a reliable font size.
+/// Both comparisons are independent of page zoom and glyph advance width.
+/// The 1:1 matrix with `0.2 Tf` and a 33-unit bbox uses 6.6 pt, while a
+/// 1:100 design grid keeps its nominal em even with a large padded bbox.
+#[cfg(feature = "type3-metrics")]
+fn type3_drawn_size(glyph: &Glyph<'_>, to_device: Affine, up: Vec2, em_size: f64) -> Option<f64> {
+    let Glyph::Type3(type3) = glyph else {
+        return None;
+    };
+    let matrix = type3.font_matrix();
+    let grid_scale = matrix.determinant().abs().sqrt();
+    if !grid_scale.is_finite() || grid_scale <= 0.1 {
+        return None;
+    }
+    let bbox = type3.font_bbox();
+    if bbox.height() <= 0.0 {
+        return None;
+    }
+    let glyph_to_device = to_device * matrix * Affine::scale(FONT_UNITS_PER_EM);
+    let origin = to_device * Point::ZERO;
+    let corners = [
+        Point::new(bbox.x0, bbox.y0),
+        Point::new(bbox.x0, bbox.y1),
+        Point::new(bbox.x1, bbox.y0),
+        Point::new(bbox.x1, bbox.y1),
+    ];
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for corner in corners {
+        let height = (glyph_to_device * corner - origin).dot(up);
+        min = min.min(height);
+        max = max.max(height);
+    }
+    let size = max - min;
+    (size.is_finite() && size > 2.0 * em_size).then_some(size)
+}
+
+#[cfg(not(feature = "type3-metrics"))]
+fn type3_drawn_size(
+    _glyph: &Glyph<'_>,
+    _to_device: Affine,
+    _up: Vec2,
+    _em_size: f64,
+) -> Option<f64> {
+    None
 }
 
 /// Serialize pages as the `pdq text` stdout JSON (an array of page objects).
