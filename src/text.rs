@@ -339,7 +339,8 @@ impl<'a> Device<'a> for TextDevice {
         {
             return;
         }
-        let font_size = type3_drawn_size(glyph, to_device).unwrap_or(em_size);
+        let up = em_y / em_size;
+        let font_size = type3_drawn_size(glyph, to_device, up, em_size).unwrap_or(em_size);
 
         // FillStroke rendering modes draw the same glyph twice; keep only
         // the fill pass. Stroke-only text still comes through because no
@@ -361,7 +362,6 @@ impl<'a> Device<'a> for TextDevice {
             }
         };
 
-        let up = em_y / em_size;
         let dir = em_x.normalize();
         let advance =
             glyph_advance_width(glyph).map(|w| to_device * Point::new(w as f64, 0.0) - origin);
@@ -420,34 +420,56 @@ fn glyph_advance_width(glyph: &Glyph<'_>) -> Option<f32> {
     }
 }
 
-/// The on-page height a Type3 glyph is drawn at, when its em says nothing
-/// about it.
+/// A compatibility estimate for Type3 fonts that use `Tf` as a small scale
+/// factor rather than a useful em size.
 ///
-/// A Type3 font draws in its own glyph space through `/FontMatrix`, and a
-/// producer that picks a non-default matrix can shrink the text-space em to
-/// a fraction of what is drawn: with `/FontMatrix [1 0 0 1 0 0]` and
-/// `0.2 Tf`, the em is 0.2 pt while a 33-unit `/FontBBox` draws 6.6 pt
-/// glyphs, and every glyph lands tens of ems from the previous one. As pdf.js's text layer does, the font bbox height then
-/// stands in for the size. The default matrix keeps the em, as every other
-/// font does.
+/// Keep the nominal em for design grids with at least ten units per em.
+/// Only coarser grids may use the bbox, and only when it exceeds two ems.
+/// This is deliberately a conservative heuristic: a non-default matrix
+/// alone does not make a possibly padded `/FontBBox` a reliable font size.
+/// Both comparisons are independent of page zoom and glyph advance width.
+/// The 1:1 matrix with `0.2 Tf` and a 33-unit bbox uses 6.6 pt, while a
+/// 1:100 design grid keeps its nominal em even with a large padded bbox.
 #[cfg(feature = "type3-metrics")]
-fn type3_drawn_size(glyph: &Glyph<'_>, to_device: Affine) -> Option<f64> {
+fn type3_drawn_size(glyph: &Glyph<'_>, to_device: Affine, up: Vec2, em_size: f64) -> Option<f64> {
     let Glyph::Type3(type3) = glyph else {
         return None;
     };
     let matrix = type3.font_matrix();
-    let bbox_height = type3.font_bbox().height().abs();
-    if matrix == Affine::scale(1.0 / FONT_UNITS_PER_EM) || bbox_height <= 0.0 {
+    let grid_scale = matrix.determinant().abs().sqrt();
+    if !grid_scale.is_finite() || grid_scale <= 0.1 {
+        return None;
+    }
+    let bbox = type3.font_bbox();
+    if bbox.height() <= 0.0 {
         return None;
     }
     let glyph_to_device = to_device * matrix * Affine::scale(FONT_UNITS_PER_EM);
-    let size =
-        (glyph_to_device * Point::new(0.0, bbox_height) - glyph_to_device * Point::ZERO).hypot();
-    (size.is_finite() && size > 0.0).then_some(size)
+    let origin = to_device * Point::ZERO;
+    let corners = [
+        Point::new(bbox.x0, bbox.y0),
+        Point::new(bbox.x0, bbox.y1),
+        Point::new(bbox.x1, bbox.y0),
+        Point::new(bbox.x1, bbox.y1),
+    ];
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for corner in corners {
+        let height = (glyph_to_device * corner - origin).dot(up);
+        min = min.min(height);
+        max = max.max(height);
+    }
+    let size = max - min;
+    (size.is_finite() && size > 2.0 * em_size).then_some(size)
 }
 
 #[cfg(not(feature = "type3-metrics"))]
-fn type3_drawn_size(_glyph: &Glyph<'_>, _to_device: Affine) -> Option<f64> {
+fn type3_drawn_size(
+    _glyph: &Glyph<'_>,
+    _to_device: Affine,
+    _up: Vec2,
+    _em_size: f64,
+) -> Option<f64> {
     None
 }
 

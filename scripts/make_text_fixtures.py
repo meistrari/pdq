@@ -130,6 +130,32 @@ def make_type3_numeric_names():
         ]))
 
 
+def make_type3_line_spacing():
+    # Both fonts draw small glyphs on baselines twelve points apart. Neither
+    # excess FontBBox padding nor horizontal shear should merge the lines.
+    cases = [
+        ("text-type3-padded-bbox.pdf", b".01 0 0 .01 0 0",
+         b"-1000 -1000 1000 1000", 50, 70, b"10"),
+        ("text-type3-shear.pdf", b"1 0 20 1 0 0",
+         b"0 -7 25 26", 25, 26, b"0.2"),
+    ]
+    for name, matrix, bbox, width, height, size in cases:
+        font = (b"<</Type/Font/Subtype/Type3/FontBBox[" + bbox + b"]"
+                b"/FontMatrix[" + matrix + b"]"
+                b"/CharProcs<</A 6 0 R/B 7 0 R>>"
+                b"/Encoding<</Type/Encoding/Differences[65/A/B]>>"
+                b"/FirstChar 65/LastChar 66/Widths[%d %d]>>" % (width, width))
+        glyph = stream(b"", b"%d 0 d0 2 0 %d %d re f" %
+                       (width, width - 4, height))
+        content = (b"BT /F1 " + size +
+                   b" Tf 72 720 Td (AB) Tj 0 -12 Td (BA) Tj ET")
+        for suffix, scale in [("", b"1"), ("-small", b"0.25"), ("-large", b"4")]:
+            scaled = b"q " + scale + b" 0 0 " + scale + b" 0 0 cm " + content + b" Q"
+            filename = name.removesuffix(".pdf") + suffix + ".pdf"
+            (FIXTURES / filename).write_bytes(
+                page_pdf(scaled, font=font, extra_objs=[glyph, glyph]))
+
+
 def make_glyph_names():
     # None of these names are in the AGL as written: the specification
     # defines them algorithmically, by stripping the variant suffix after
@@ -178,6 +204,7 @@ if __name__ == "__main__":
     make_degraded()
     make_glyph_names()
     make_type3_numeric_names()
+    make_type3_line_spacing()
     make_annotations()
     for f in sorted(FIXTURES.glob("text-*.pdf")):
         print(f.name, f.stat().st_size, "bytes")

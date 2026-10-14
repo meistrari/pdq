@@ -353,6 +353,40 @@ fn type3_runs_use_widths_and_bbox_height() {
     assert!((run.width - 25.0).abs() < 0.01, "width {}", run.width);
 }
 
+#[cfg(feature = "type3-metrics")]
+#[test]
+fn type3_bbox_padding_does_not_merge_lines() {
+    for (suffix, scale) in [("", 1.0), ("-small", 0.25), ("-large", 4.0)] {
+        let filename = format!("text-type3-padded-bbox{suffix}.pdf");
+        let pages = extract_all(&filename);
+        assert_eq!(run_texts(&pages), ["AB", "BA"], "{filename}");
+        assert!(!pages[0].degraded, "{filename}");
+        for run in &pages[0].runs {
+            assert!(
+                (run.font_size - 10.0 * scale).abs() < 0.01,
+                "{filename}: {run:?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "type3-metrics")]
+#[test]
+fn type3_horizontal_shear_does_not_merge_lines() {
+    for (suffix, scale) in [("", 1.0), ("-small", 0.25), ("-large", 4.0)] {
+        let filename = format!("text-type3-shear{suffix}.pdf");
+        let pages = extract_all(&filename);
+        assert_eq!(run_texts(&pages), ["AB", "BA"], "{filename}");
+        assert!(!pages[0].degraded, "{filename}");
+        for run in &pages[0].runs {
+            assert!(
+                (run.font_size - 6.6 * scale).abs() < 0.01,
+                "{filename}: {run:?}"
+            );
+        }
+    }
+}
+
 /// The default must extract appearance-stream text, and it must do so through
 /// `ExtractTextOptions::default()` specifically: a derived `Default` would
 /// leave the flag `false` and silently reinstate the data loss for every
