@@ -567,6 +567,14 @@ feature. Text extraction is `pdq::extract_text` with `ExtractTextOptions
 | --- | --- | --- |
 | `render` | yes | `pdq render` / `pdq::render_pages` via hayro |
 | `text` | yes | `pdq text` / `pdq::extract_text` via hayro |
+| `type3-metrics` | no | `pdq text` sizes and spaces Type3 glyphs from the font's `/Widths`, `/FontMatrix` and `/FontBBox` |
+
+`type3-metrics` needs the patched hayro-interpret this repository carries in
+`[patch.crates-io]`, which cargo strips on publish, so it only builds from a
+checkout: `cargo install --path . --features type3-metrics`. The release
+binaries are built with it. Without it, a Type3 font whose em is a fraction of
+what it draws (a non-default `/FontMatrix` with a tiny `Tf`, as some producers
+write) comes back as one run per glyph with a near-zero `font_size`.
 
 Build with `--no-default-features` for a smaller split/merge-only binary.
 Minimum supported Rust version: **1.92**.

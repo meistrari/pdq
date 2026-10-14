@@ -7,7 +7,7 @@
 #
 # One crate name per line; # starts a comment.
 
-# hayro-interpret (fork: Guiqft/hayro @ agl-glyph-names-0.7) carries two fixes:
+# hayro-interpret (fork: meistrari/hayro @ type3-text-0.7) carries three fixes:
 #
 # - tint-transform memoization (pdq#30). Pure performance: Separation/DeviceN
 #   images re-run the tint transform per pixel. Merged upstream in a more
@@ -22,6 +22,14 @@
 #   itself when run from an unpacked release, where there is no patch to
 #   drop, so the published suite stays green.
 #
-# Both degrade gracefully, so the published crate is correct without them.
+# - Type3 glyph names and metrics (meistrari/hayro#1). Output quality only:
+#   without it a Type3 font with no ToUnicode and code-named glyphs comes
+#   back as U+FFFD and flagged degraded, as it did before. The accessors it
+#   adds are only called behind the off-by-default `type3-metrics` feature,
+#   so the published crate builds without them. Pinned by
+#   tests/text.rs::type3_glyphs_named_after_their_code_resolve_without_tounicode,
+#   which skips itself from an unpacked release like the AGL test.
+#
+# All three degrade gracefully, so the published crate is correct without them.
 # The release binaries are built from this repo and do carry them.
 hayro-interpret

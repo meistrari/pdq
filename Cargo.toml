@@ -14,6 +14,11 @@ categories = ["command-line-utilities"]
 default = ["render", "text"]
 render = ["dep:hayro"]
 text = ["dep:hayro", "dep:kurbo"]
+# Type3 advance widths and drawn size in `pdq text`. Needs the Type3Glyph
+# accessors (advance_width, font_matrix, font_bbox) that only the patched
+# hayro-interpret below provides; off by default because cargo strips
+# [patch.crates-io] on publish, and the published crate must still build.
+type3-metrics = ["text"]
 dhat-heap = ["dep:dhat"]
 
 [dependencies]
@@ -36,19 +41,24 @@ predicates = "3.1.3"
 serde_json = "1.0"
 tempfile = "3.23.0"
 
-# Carry a patched hayro-interpret until two fixes land upstream:
+# Carry a patched hayro-interpret until these fixes land upstream:
 # - tint-transform memoization (issue #30): Separation/DeviceN color
 #   conversion re-ran the (PostScript) tint transform once per image pixel.
 # - AGL-spec glyph-name mapping (issue #32, upstream PR LaurenzV/hayro#1277):
 #   variant suffixes (hyphen.case) and ligature components (f_i) resolved to
 #   None, so `pdq text` flagged recoverable glyphs as degraded U+FFFD.
-# Fork branch: agl-glyph-names-0.7 = tint-transform-lut-0.7 + the AGL fix
-# (based on hayro-interpret-v0.7.0).
+# - Type3 glyph names (meistrari/hayro#1): with no ToUnicode a Type3 glyph
+#   now resolves through its /Differences name, including names that spell
+#   their own code (/C41), and Type3Glyph exposes advance_width, font_matrix
+#   and font_bbox for the `type3-metrics` feature.
+# Fork: meistrari/hayro type3-text-0.7 = Guiqft/hayro agl-glyph-names-0.7
+# (tint-transform-lut-0.7 + the AGL fix, based on hayro-interpret-v0.7.0)
+# + the Type3 fix.
 [patch.crates-io]
 # lopdf 0.43.0 drops streams with indentation before endstream.
 # Keep the upstream source plus the boundary fix documented in vendor/lopdf/PATCHES.md.
 lopdf = { path = "vendor/lopdf" }
-hayro-interpret = { git = "https://github.com/Guiqft/hayro", branch = "agl-glyph-names-0.7" }
+hayro-interpret = { git = "https://github.com/meistrari/hayro", rev = "874722e7cb13a32de5a6abbb1c7951dceda930d0" }
 # Carry a patched hayro until the tiling-pattern fix lands upstream (issue
 # LaurenzV/hayro#404): the tile pixmap was sized from XStep/YStep alone, so
 # the /XStep 99999 used by iText signature pages saturated the u16 cast at

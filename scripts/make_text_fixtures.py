@@ -8,9 +8,13 @@ All fixtures are tiny, uncompressed, hand-checkable PDFs:
   text-rotate90.pdf  same MediaBox with /Rotate 90, "Rotated" at 24pt
                      (100,200 baseline in unrotated PDF space).
   text-image-only.pdf  one page whose only content is a DCT image (no text).
-  text-degraded.pdf  a Type3 font with no ToUnicode: the glyph renders but
-                     has no Unicode mapping, so extraction must flag the
-                     page as degraded.
+  text-degraded.pdf  a Type3 font with no ToUnicode and a glyph name that
+                     maps to nothing: the glyph renders but has no Unicode
+                     mapping, so extraction must flag the page as degraded.
+  text-type3-numeric-names.pdf  a Type3 font as some producers write it:
+                     no ToUnicode, glyphs named after their own
+                     hex code (/C41 = "A"), /FontMatrix [1 0 0 1 0 0] and
+                     0.2 Tf, so the em is 0.2 pt while glyphs draw 6.6 pt.
   text-glyph-names.pdf  no ToUnicode either, but the /Differences names are
                      resolvable through the AGL's algorithmic rules, so
                      extraction must recover them rather than degrade.
@@ -90,17 +94,40 @@ def make_image_only():
 
 
 def make_degraded():
-    # Type3 fonts can only provide Unicode through a ToUnicode CMap; this one
-    # has none, so its glyphs are visible but unmappable.
+    # No ToUnicode, and a glyph name that is neither in the AGL nor spells
+    # its own code, so the glyph is visible but unmappable.
     glyph = stream(b"", b"750 0 d0 50 50 650 650 re f")
     font = (b"<</Type/Font/Subtype/Type3/FontBBox[0 0 750 750]"
             b"/FontMatrix[0.001 0 0 0.001 0 0]"
-            b"/CharProcs<</square 6 0 R>>"
-            b"/Encoding<</Type/Encoding/Differences[65/square]>>"
+            b"/CharProcs<</shape1 6 0 R>>"
+            b"/Encoding<</Type/Encoding/Differences[65/shape1]>>"
             b"/FirstChar 65/LastChar 65/Widths[750]>>")
     content = b"BT /F1 12 Tf 72 720 Td (AAA) Tj ET"
     (FIXTURES / "text-degraded.pdf").write_bytes(
         page_pdf(content, font=font, extra_objs=[glyph]))
+
+
+def make_type3_numeric_names():
+    # As some producers write it: a Type3 font in a 1:1 glyph space, scaled down
+    # by a tiny Tf, whose /Differences names each glyph after its own code in
+    # hex. A reader that only consults ToUnicode and the AGL sees U+FFFD, and
+    # one that takes the 0.2 pt em for the font size sees every glyph tens of
+    # ems apart and emits one run per glyph.
+    def glyph(proc: bytes) -> bytes:
+        return stream(b"", b"25 0 0 -7 25 26 d1 " + proc)
+
+    font = (b"<</Type/Font/Subtype/Type3/FontBBox[0 -7 25 26]"
+            b"/FontMatrix[1 0 0 1 0 0]"
+            b"/CharProcs<</C20 6 0 R/C41 7 0 R/C42 8 0 R>>"
+            b"/Encoding<</Type/Encoding/Differences[32/C20 65/C41/C42]>>"
+            b"/FirstChar 32/LastChar 66/Widths[25" + b" 0" * 32 + b" 25 25]>>")
+    content = b"BT /F1 0.2 Tf 72 720 Td (AB BA) Tj ET"
+    (FIXTURES / "text-type3-numeric-names.pdf").write_bytes(page_pdf(
+        content, font=font, extra_objs=[
+            stream(b"", b"25 0 d0"),
+            glyph(b"2 0 20 26 re f"),
+            glyph(b"2 0 20 26 re f 6 6 8 14 re f"),
+        ]))
 
 
 def make_glyph_names():
@@ -150,6 +177,7 @@ if __name__ == "__main__":
     make_image_only()
     make_degraded()
     make_glyph_names()
+    make_type3_numeric_names()
     make_annotations()
     for f in sorted(FIXTURES.glob("text-*.pdf")):
         print(f.name, f.stat().st_size, "bytes")
