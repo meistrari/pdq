@@ -120,6 +120,7 @@ jobs:
           patched="$(awk '
             /^\[patch\.crates-io\]/ { in_patch = 1; next }
             /^\[/                   { in_patch = 0 }
+            /^[[:space:]]*#/        { next }
             in_patch && /=/         { print $1 }
           ' Cargo.toml)"
           status=0
