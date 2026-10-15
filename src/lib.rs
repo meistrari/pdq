@@ -5,9 +5,11 @@ mod filter;
 pub mod fingerprint;
 #[cfg(any(feature = "render", feature = "text"))]
 mod hayro_stack;
+mod json;
 pub mod lazy;
 pub mod load;
 pub mod merge;
+pub mod outline;
 pub mod range;
 #[cfg(feature = "render")]
 pub mod render;
@@ -30,6 +32,9 @@ pub use fingerprint::{
     FINGERPRINT_VERSION,
 };
 pub use merge::{merge, merge_with_options, MergeInput, MergeOptions};
+pub use outline::{
+    outline_to_json, read_outline, read_outline_with_password, Outline, OutlineEntry,
+};
 pub use range::{PageRangeError, PageRangeGroup};
 #[cfg(feature = "render")]
 pub use render::{render_pages, RenderOptions};

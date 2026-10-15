@@ -24,6 +24,8 @@ enum Command {
     PageCount(PageCountArgs),
     /// Print each page's size in PDF points and rotation as JSON, without rendering
     Dimensions(DimensionsArgs),
+    /// Print the outline (bookmarks) as JSON: each entry's title, nesting depth and 1-based page
+    Outline(OutlineArgs),
     /// Print a content fingerprint per page as JSON (equal only for pages that draw the same)
     Fingerprint(FingerprintArgs),
     #[cfg(feature = "render")]
@@ -96,6 +98,15 @@ struct PageCountArgs {
 
 #[derive(Debug, Args)]
 struct DimensionsArgs {
+    input: PathBuf,
+
+    /// Password for encrypted inputs
+    #[arg(long, value_name = "PASSWORD")]
+    password: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct OutlineArgs {
     input: PathBuf,
 
     /// Password for encrypted inputs
@@ -201,6 +212,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Dimensions(args) => {
             let pages = page_dimensions_with_password(&args.input, args.password.as_deref())?;
             println!("{}", dimensions_json(&pages));
+        }
+        Command::Outline(args) => {
+            let outline = pdq::read_outline_with_password(&args.input, args.password.as_deref())?;
+            println!("{}", pdq::outline_to_json(&outline));
         }
         Command::Fingerprint(args) => {
             let options = pdq::FingerprintOptions {
