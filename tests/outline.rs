@@ -418,3 +418,75 @@ fn encrypted_inputs_need_the_password() {
             outline.pages
         )));
 }
+
+#[test]
+fn name_tree_cycles_duplicates_and_the_depth_cap_are_handled() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("name-tree.pdf");
+    write_pdf(&path, 3, |document, pages| {
+        // Two leaves define "dup"; the first one in tree order wins.
+        let first = document.add_object(dictionary! {
+            "Names" => vec![Object::string_literal("dup"), fit(pages[0])],
+        });
+        let second = document.add_object(dictionary! {
+            "Names" => vec![
+                Object::string_literal("dup"),
+                fit(pages[1]),
+                Object::string_literal("second"),
+                fit(pages[1]),
+            ],
+        });
+        // A /Kids chain: "edge" sits at depth 256, the deepest level read, and
+        // "deep" at depth 257, past the cap.
+        let edge = document.add_object(dictionary! {
+            "Names" => vec![Object::string_literal("edge"), fit(pages[2])],
+        });
+        let deep = document.add_object(dictionary! {
+            "Names" => vec![Object::string_literal("deep"), fit(pages[2])],
+        });
+        let deep_parent =
+            document.add_object(dictionary! { "Kids" => vec![Object::Reference(deep)] });
+        let mut chain = document.add_object(dictionary! {
+            "Kids" => vec![Object::Reference(edge), Object::Reference(deep_parent)],
+        });
+        for _ in 0..254 {
+            chain = document.add_object(dictionary! { "Kids" => vec![Object::Reference(chain)] });
+        }
+        // The last kid points back to the root: a /Kids cycle.
+        let root = document.new_object_id();
+        let back = document.add_object(dictionary! { "Kids" => vec![Object::Reference(root)] });
+        document.objects.insert(
+            root,
+            dictionary! {
+                "Kids" => vec![
+                    Object::Reference(first),
+                    Object::Reference(second),
+                    Object::Reference(chain),
+                    Object::Reference(back),
+                ],
+            }
+            .into(),
+        );
+        let named = |name: &str| dictionary! { "Dest" => Object::string_literal(name) };
+        let outline = add_outline(
+            document,
+            vec![
+                item("Dup", named("dup"), vec![]),
+                item("Second", named("second"), vec![]),
+                item("Edge", named("edge"), vec![]),
+                item("Deep", named("deep"), vec![]),
+            ],
+        );
+        dictionary! { "Outlines" => outline, "Names" => dictionary! { "Dests" => root } }
+    });
+
+    assert_eq!(
+        pages_by_title(&path),
+        vec![
+            ("Dup".to_string(), Some(1)),
+            ("Second".to_string(), Some(2)),
+            ("Edge".to_string(), Some(3)),
+            ("Deep".to_string(), None),
+        ]
+    );
+}
