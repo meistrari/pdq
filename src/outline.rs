@@ -379,7 +379,14 @@ pub(crate) fn decode_text(bytes: &[u8]) -> (String, bool) {
             Err(_) => (String::from_utf8_lossy(rest).into_owned(), true),
         }
     } else {
-        decode_pdf_doc(bytes)
+        // PDFDocEncoding leaves 0x00 undefined, so trailing NUL padding would
+        // decode as U+FFFD and flag the title. Strip it before decoding; a NUL
+        // inside the title is still flagged.
+        let end = bytes
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .map_or(0, |last| last + 1);
+        decode_pdf_doc(&bytes[..end])
     };
     let kept = text.trim_end_matches('\0').len();
     text.truncate(kept);
@@ -488,6 +495,16 @@ mod tests {
         assert_eq!(
             decode_text(b"\xef\xbb\xbf\xff"),
             ("\u{FFFD}".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn pdf_doc_titles_drop_trailing_nuls_but_flag_inner_ones() {
+        assert_eq!(decode_text(b"Cover\x00"), ("Cover".to_string(), false));
+        assert_eq!(decode_text(b"Cover\x00\x00"), ("Cover".to_string(), false));
+        assert_eq!(
+            decode_text(b"Co\x00ver"),
+            ("Co\u{FFFD}ver".to_string(), true)
         );
     }
 
