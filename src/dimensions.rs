@@ -281,7 +281,7 @@ fn integer(source: &PdfSource, object: &Object) -> Option<i64> {
 
 /// Follow reference chains to a direct object, cloning only when the value
 /// is indirect. `None` on dangling references or reference cycles.
-fn dereference(source: &PdfSource, object: &Object) -> Option<Object> {
+pub(crate) fn dereference(source: &PdfSource, object: &Object) -> Option<Object> {
     let mut object = object.clone();
     let mut hops = 0usize;
     while let Object::Reference(id) = object {

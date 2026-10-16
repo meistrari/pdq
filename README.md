@@ -93,6 +93,9 @@ pdq merge --output merged.pdf a.pdf b.pdf c.pdf
 # Every page's size and rotation as JSON, without rendering
 pdq dimensions input.pdf
 
+# The outline (bookmarks) as JSON, each entry with its 1-based page
+pdq outline input.pdf
+
 # A content fingerprint per page as JSON (find the same page in other files)
 pdq fingerprint input.pdf
 
@@ -212,6 +215,39 @@ some DPIs — on a US Letter page at 150, 200, or 300 DPI (612×792 pt at
 Mixed-size documents report each page's true size, and per-page damage
 degrades gracefully: a missing or malformed box falls back to the inherited
 value, then to A4; a malformed `/Rotate` falls back to 0.
+
+### `pdq outline` — bookmarks with resolved pages
+
+```sh
+pdq outline [--password PW] input.pdf
+```
+
+Prints the document outline (bookmarks) as JSON on stdout: one flat array in
+document order, with each entry's title, nesting depth and the **1-based** page
+it points at. Like `dimensions` it is a metadata walk — the page tree plus the
+outline tree, no content streams, no rendering:
+
+```json
+{"pages":120,"outline":[{"title":"Cover","page":1,"depth":0,"degraded":false},{"title":"Chapter 1","page":2,"depth":0,"degraded":false},{"title":"1.1 Background","page":5,"depth":1,"degraded":false},{"title":"Related standard","page":null,"depth":0,"degraded":false}]}
+```
+
+The page numbers drop straight into `--out` and `--pages` ranges: in a bundle,
+entry *n* starts a document that ends on the page before entry *n+1*, so the
+outline turns into `split` ranges with no arithmetic beyond that.
+
+- Destinations resolve through `/Dest` and `/GoTo` actions, explicit
+  destinations, and named destinations in both the name tree (`/Names /Dests`)
+  and the older catalog `/Dests` dictionary.
+- `page` is `null` when an entry points at no page of this document — a URI,
+  a remote or launch action, an unresolvable name, or a stale destination. The
+  entry keeps its title and position, so indexes into the array stay stable.
+- A document without an outline prints `"outline":[]` and exits 0.
+- Titles decode from PDFDocEncoding and from UTF-16BE (or UTF-8) with a
+  byte-order mark. A title that cannot be fully decoded — missing, not a
+  string, or holding bytes its encoding does not define — keeps U+FFFD in place
+  of the undecodable characters and reports `"degraded":true`, like `text`.
+- Looping `/First`/`/Next` chains and runaway nesting are cut off rather than
+  followed forever.
 
 ### `pdq fingerprint` — per-page content fingerprints
 
